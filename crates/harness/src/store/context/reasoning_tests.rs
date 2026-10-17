@@ -464,3 +464,102 @@ fn effective_selection_reads_current_owner_head_and_final_positional_pin() {
         (Some(current), "selected".into(), Effort::Max)
     );
 }
+
+#[test]
+fn effective_selection_uses_pending_embedded_frontier_before_and_after_settlement_and_reopen() {
+    use crate::embedding::{BindingInitialAuthority, HostIdentity};
+    use crate::store::embedded_round::EmbeddedRoundOutcome;
+    struct Initial(HostIdentity);
+    impl BindingInitialAuthority for Initial {
+        fn validate_initial(&self, identity: &HostIdentity) -> std::result::Result<bool, String> {
+            Ok(identity == &self.0)
+        }
+    }
+    for with_settled in [false, true] {
+        let path = std::env::temp_dir().join(format!(
+            "effective-embedded-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let host = HostIdentity {
+            run: "effective-run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "first".into(),
+        };
+        let identity = ConversationIdentity::Embedded {
+            run: host.run.clone(),
+            actor: host.actor.clone(),
+            incarnation: host.incarnation.clone(),
+        };
+        let pending = RequestId("active-selection".into());
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .bind_initial_embedded_binding(&host, None, &Initial(host.clone()))
+                .unwrap();
+            store
+                .initialize_context_target(
+                    &identity,
+                    &ContextProjectionTarget {
+                        model: "child-admitted-model".into(),
+                        route: ResponsesRoute::DeepSeek,
+                        protocol: ResponsesProtocol::Standard,
+                    },
+                )
+                .unwrap();
+            let old = RequestId("settled-selection".into());
+            if with_settled {
+                store
+                    .write_embedded_request(
+                        &host,
+                        &old,
+                        None,
+                        &[Item::configuration_update(Effort::Low)],
+                        Usage::default(),
+                    )
+                    .unwrap();
+                assert!(
+                    store
+                        .settle_embedded_round(&host, None, &old, EmbeddedRoundOutcome::Completed)
+                        .unwrap()
+                );
+            }
+            store
+                .write_embedded_request(
+                    &host,
+                    &pending,
+                    with_settled.then_some(&old),
+                    &[
+                        Item::configuration_update(Effort::High),
+                        Item::configuration_update(Effort::Max),
+                    ],
+                    Usage::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                store.embedded_agent_head(&host).unwrap(),
+                with_settled.then_some(old)
+            );
+            let selected = store
+                .effective_inference_selection(&identity, "root-default", Effort::None)
+                .unwrap();
+            assert_eq!(
+                (selected.head, selected.model, selected.effort),
+                (
+                    Some(pending.clone()),
+                    "child-admitted-model".into(),
+                    Effort::Max
+                )
+            );
+        }
+        let store = Store::open(&path).unwrap();
+        let selected = store
+            .effective_inference_selection(&identity, "root-default", Effort::Low)
+            .unwrap();
+        assert_eq!(
+            (selected.head, selected.model, selected.effort),
+            (Some(pending), "child-admitted-model".into(), Effort::Max)
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+}

@@ -1893,14 +1893,33 @@ impl Store {
         let mut c = self.lock()?;
         c.read_transaction(|tx| {
             validate_identity(tx, &self.store_id, identity)?;
-            let head: Option<Option<String>> = tx
-                .query_row(
-                    "SELECT head_request FROM agents WHERE path=?1",
-                    [&identity.actor().0],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let head = head.ok_or(ContextError::UnsupportedState)?.map(RequestId);
+            let head = match identity {
+                ConversationIdentity::Embedded {
+                    run,
+                    actor,
+                    incarnation,
+                } => {
+                    let frontier = embedded_round::frontier(
+                        tx,
+                        &crate::embedding::HostIdentity {
+                            run: run.clone(),
+                            actor: actor.clone(),
+                            incarnation: incarnation.clone(),
+                        },
+                    )?;
+                    frontier.pending_head.or(frontier.settled_head)
+                }
+                ConversationIdentity::Standalone { actor, .. } => {
+                    let head: Option<Option<String>> = tx
+                        .query_row(
+                            "SELECT head_request FROM agents WHERE path=?1",
+                            [&actor.0],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    head.ok_or(ContextError::UnsupportedState)?.map(RequestId)
+                }
+            };
             let current = state(tx, identity)?;
             let items = match &head {
                 Some(head) => checked_projection(
