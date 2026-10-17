@@ -219,8 +219,8 @@ mod tests {
 
     #[test]
     fn raw_usage_survives_store_event_reopen_without_inventing_totals() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("usage.sqlite");
+        let path =
+            std::env::temp_dir().join(format!("harness-usage-{}.sqlite", uuid::Uuid::new_v4()));
         let examples = [
             serde_json::json!({}),
             serde_json::json!({"usage":null}),
@@ -253,6 +253,8 @@ mod tests {
         assert!(actual.iter().all(|usage| !usage.has_reported_totals()));
         assert_eq!(actual[2].input_tokens, Some(0));
         assert_eq!(actual[2].output_tokens, None);
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
