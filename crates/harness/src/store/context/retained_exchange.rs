@@ -77,10 +77,10 @@ fn resolve(
         Some(TerminalOutcome::Success) => {
             let (hash, _, _) =
                 terminal::exact_terminal(c, &operation)?.ok_or(ContextError::UnsupportedState)?;
-            // Choose the first canonical publication, independent of later
-            // context copies. Its retained row identity remains stable.
+            // Choose an existing canonical publication. The returned reference
+            // binds its exact Origin; later use never repeats this selection.
             let publication: Option<(String, i64)> = c.query_row(
-                "SELECT request_id,position FROM request_items WHERE output_operation=?1 AND source_request IS NULL ORDER BY rowid LIMIT 1",
+                "SELECT request_id,position FROM request_items WHERE output_operation=?1 AND source_request IS NULL ORDER BY request_id,position LIMIT 1",
                 [serde_json::to_string(&operation)?], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional()?;
             let Some((request, position)) = publication else {
@@ -156,14 +156,34 @@ pub(super) fn qualified_items(
         return Err(ContextError::InvalidReference.into());
     }
     let call_reference = ContextReference(serde_json::to_string(&vec![identity.call.clone()])?);
-    let (operation, items) =
-        resolve(c, snapshot, &call_reference)?.map_err(|_| ContextError::Ineligible)?;
-    if operation != identity.operation
-        || items[0].origin != identity.call
-        || items[1].origin != identity.output
+    let call = authorized_call(c, snapshot, &call_reference)?
+        .map_err(|_| ContextError::InvalidReference)?;
+    let operation = super::super::validation::operation_for_occurrence(c, &call)?
+        .ok_or(ContextError::InvalidReference)?;
+    if operation != identity.operation || call.origin != identity.call {
+        return Err(ContextError::InvalidReference.into());
+    }
+    let Some((hash, TerminalOutcome::Success, _)) = terminal::exact_terminal(c, &operation)? else {
+        return Err(ContextError::Ineligible.into());
+    };
+    if hash != identity.output.hash {
+        return Err(ContextError::InvalidReference.into());
+    }
+    let outputs = occurrences_for_requests(c, &HashSet::from([identity.output.request.clone()]))?;
+    let output = outputs
+        .into_iter()
+        .find(|item| {
+            item.request == identity.output.request && item.position == identity.output.position
+        })
+        .ok_or(ContextError::InvalidReference)?;
+    if output.origin != identity.output
+        || output.hash != hash
+        || output.output_operation.as_ref() != Some(&operation)
     {
         return Err(ContextError::InvalidReference.into());
     }
+    let items = vec![call, output];
+    super::super::output_publication::validate_history(c, &items)?;
     Ok(items)
 }
 
@@ -486,6 +506,78 @@ mod tests {
             store.replay_tool_output_operation(&operation).unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn captured_publication_revalidates_exact_origin_after_other_publications_and_vacuum() {
+        let path = std::env::temp_dir().join(format!(
+            "exchange-publications-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let copy =
+            std::env::temp_dir().join(format!("exchange-vacuum-{}.sqlite", uuid::Uuid::new_v4()));
+        let (store, snapshot, reference, operation) =
+            fixture_in(Store::open(&path).unwrap(), Some(success()), true);
+        let RetainedExchangeObservation::Available(source) = store
+            .observe_retained_exchange(&snapshot, &reference)
+            .unwrap()
+        else {
+            panic!("source")
+        };
+        let before = qualified_items(&store.lock().unwrap(), &snapshot, &source).unwrap();
+        let other = RequestId("aaa-other-publication".into());
+        store
+            .write_request(
+                &other,
+                Some(&operation.request),
+                "/other",
+                &[],
+                Usage::default(),
+            )
+            .unwrap();
+        store
+            .append_operation_output(&operation, &operation.request, &other)
+            .unwrap();
+        let RetainedExchangeObservation::Available(other_source) = store
+            .observe_retained_exchange(&snapshot, &reference)
+            .unwrap()
+        else {
+            panic!("other source")
+        };
+        // New observations can select another legitimate publication. An issued
+        // reference remains bound to its own source, not to today's selection.
+        assert_ne!(source, other_source);
+        let after = qualified_items(&store.lock().unwrap(), &snapshot, &source).unwrap();
+        assert_eq!(before, after);
+        store
+            .lock()
+            .unwrap()
+            .execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
+            .unwrap();
+        drop(store);
+        let store = Store::open(&copy).unwrap();
+        let reopened = qualified_items(&store.lock().unwrap(), &snapshot, &source).unwrap();
+        assert_eq!(reopened, before);
+        let receipt = commit(
+            &store,
+            &snapshot,
+            vec![ContextChange::AppendRetainedExchange { source }],
+        );
+        assert!(!receipt.changed);
+        let history = store
+            .context_request_state(&receipt.head, &snapshot.operation.origin)
+            .unwrap();
+        assert_eq!(
+            history
+                .history
+                .iter()
+                .filter(|(_, _, item)| item.0["call_id"] == "source")
+                .count(),
+            2
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(copy).unwrap();
     }
 
     proptest::proptest! {
