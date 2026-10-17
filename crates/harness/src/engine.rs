@@ -1969,8 +1969,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     update: ModelOutputUpdate::Started,
                 });
             }
-            let create = self.client.create_streaming(req, event_tx);
-            tokio::pin!(create);
+            let mut create = Box::pin(self.client.create_streaming(req, event_tx));
             let mut turn_call_ids = Vec::<CallId>::new();
             let mut turn_call_items = Vec::<(CallId, Item)>::new();
             let mut inline_settled = Vec::<(
@@ -1983,7 +1982,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let mut persisted_items = Vec::<Item>::new();
             let mut event_stream_open = true;
             let mut deferred_dispatch_error = None;
-            let mut failure_summary = None;
+            let mut transport_observation = None;
             let turn = loop {
                 tokio::select! {
                     settlement = settlements.recv(), if settlements_open => {
@@ -2000,8 +1999,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Ok(turn) => break turn,
                         Err(error) => {
                             output_lifetime.stop();
+                            // Drop the actual producer before draining its reserved
+                            // final observation; dropping a Pin<&mut _> is insufficient.
+                            drop(create);
                             let retained_tail = self.retain_provider_tail(&provider_request, &parent, &mut event_rx).await;
-                            let retained_summary = match failure_summary.take() { Some(summary) => self.retain_transport_failure_summary(&parent, summary).await, None => Ok(()) };
+                            let retained_observation = match transport_observation.take() { Some(summary) => self.retain_transport_observation(&parent, summary).await, None => Ok(()) };
                             let state = if matches!(error, TransportError::IncompleteResponse(_)) { crate::store::ProviderResponseState::Interrupted } else if error.request_failure().is_some() { crate::store::ProviderResponseState::Rejected } else { crate::store::ProviderResponseState::Failed };
                             let store = self.store.clone();
                             let stopped_request = parent.clone();
@@ -2016,7 +2018,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 cause = cause.with_secondary(RoundFailureStage::ProviderTailRecording,
                                     Some(parent.clone()), source);
                             }
-                            if let Err(source) = retained_summary {
+                            if let Err(source) = retained_observation {
                                 cause = cause.with_secondary(RoundFailureStage::ProviderTailRecording,
                                     Some(parent.clone()), source);
                             }
@@ -2030,11 +2032,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     changed = cancellation.changed() => {
                         if changed.is_err() || *cancellation.borrow() {
                             output_lifetime.stop();
+                            drop(create);
                             let retained_tail = self.retain_provider_tail(&provider_request, &parent, &mut event_rx).await;
+                            let retained_observation = match transport_observation.take() { Some(summary) => self.retain_transport_observation(&parent, summary).await, None => Ok(()) };
                             let store = self.store.clone();
                             let stopped = parent.clone();
                             let stopped = blocking(move || store.stop_provider_response(&stopped, crate::store::ProviderResponseState::Interrupted)).await;
                             let mut cause = EngineError::Cancelled { head_request: Some(parent.clone()) };
+                            if let Err(source) = retained_observation {
+                                cause = cause.with_secondary(RoundFailureStage::ProviderTailRecording,
+                                    Some(parent.clone()), source);
+                            }
                             if let Err(source) = retained_tail {
                                 cause = cause.with_secondary(RoundFailureStage::ProviderTailRecording,
                                     Some(parent.clone()), source);
@@ -2107,7 +2115,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     Err(error) => deferred_dispatch_error = Some(error),
                                 }
                             }
-                            Some(StreamEvent::FailureSummary(summary)) => { failure_summary = Some(summary); }
+                            Some(StreamEvent::Observation(summary)) => { transport_observation = Some(summary); }
                             Some(StreamEvent::Delta {item_id, channel, index, text, tool_name}) => {
                                 self.observe_delta(&parent, item_id, channel, index, text, tool_name);
                             }
@@ -2131,11 +2139,14 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     Err(error) => return Err(error),
                 }
             };
+            if let Some(observation) = transport_observation.take() {
+                self.retain_transport_observation(&parent, observation)
+                    .await?;
+            }
             // A completed response can race the buffered final item events.
             while let Ok(event) = event_rx.try_recv() {
-                if let StreamEvent::FailureSummary(summary) = event {
-                    self.retain_transport_failure_summary(&parent, summary)
-                        .await?;
+                if let StreamEvent::Observation(summary) = event {
+                    self.retain_transport_observation(&parent, summary).await?;
                     continue;
                 }
                 if let StreamEvent::Delta {
@@ -4319,9 +4330,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut failure = None;
         while let Ok(event) = events.try_recv() {
             let result = match event {
-                StreamEvent::FailureSummary(summary) => {
-                    self.retain_transport_failure_summary(request, summary)
-                        .await
+                StreamEvent::Observation(summary) => {
+                    self.retain_transport_observation(request, summary).await
                 }
                 StreamEvent::CompletedItem(done) => {
                     async {
@@ -4366,10 +4376,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         failure.map_or(Ok(()), Err)
     }
 
-    async fn retain_transport_failure_summary(
+    async fn retain_transport_observation(
         &self,
         request: &RequestId,
-        summary: crate::transport::TransportFailureSummary,
+        summary: crate::transport::TransportObservation,
     ) -> Result<(), EngineError> {
         let store = self.store.clone();
         let request = request.clone();
@@ -4377,7 +4387,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             store
                 .record_event(
                     Some(&request),
-                    "transport_failure_summary",
+                    "responses_transport",
                     &serde_json::to_value(summary)?,
                 )
                 .map(|_| ())
@@ -4807,10 +4817,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let issued = prepared.issuer().clone();
         let request = prepared.request_id().clone();
         let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-        let create = self.client.create_streaming(prepared, tx);
-        tokio::pin!(create);
+        let mut create = Box::pin(self.client.create_streaming(prepared, tx));
         let mut stream_open = true;
-        let mut failure_summary = None;
+        let mut transport_observation = None;
         let result = loop {
             if *cancellation.borrow() || cancellation.has_changed().is_err() {
                 break Err(EngineError::Cancelled {
@@ -4830,18 +4839,16 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             break Err(error);
                         }
                     }
-                    Some(StreamEvent::FailureSummary(summary)) => failure_summary = Some(summary),
+                    Some(StreamEvent::Observation(summary)) => transport_observation = Some(summary),
                     Some(StreamEvent::Delta { .. }) => {}
                     None => stream_open = false,
                 }
             }
         };
+        drop(create);
         let retained_tail = self.retain_provider_tail(&issued, &request, &mut rx).await;
-        let retained_summary = match failure_summary {
-            Some(summary) => {
-                self.retain_transport_failure_summary(&request, summary)
-                    .await
-            }
+        let retained_observation = match transport_observation {
+            Some(summary) => self.retain_transport_observation(&request, summary).await,
             None => Ok(()),
         };
         match result {
@@ -4850,7 +4857,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 let recorded = turn.clone();
                 blocking(move || store.record_provider_turn(&issued, &recorded)).await?;
                 retained_tail?;
-                retained_summary?;
+                retained_observation?;
                 Ok(turn)
             }
             Err(error) => {
@@ -4878,7 +4885,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         source,
                     );
                 }
-                if let Err(source) = retained_summary {
+                if let Err(source) = retained_observation {
                     cause = cause.with_secondary(
                         RoundFailureStage::ProviderTailRecording,
                         Some(request.clone()),

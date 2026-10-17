@@ -57,7 +57,7 @@ pub enum OutputChannel {
 pub enum StreamEvent {
     CompletedItem(CompletedOutputItem),
     /// Bounded diagnostics, never a completed output item or dispatch authority.
-    FailureSummary(super::TransportFailureSummary),
+    Observation(super::TransportObservation),
     Delta {
         item_id: String,
         channel: OutputChannel,
@@ -88,7 +88,7 @@ impl ResponseAssembly {
         data: &str,
         token: &str,
         account: &str,
-        mut observation: Option<&mut super::TransportFailureSummary>,
+        mut observation: Option<&mut super::TransportObservation>,
     ) -> Result<Option<StreamEvent>, TransportError> {
         let event: Value = serde_json::from_str(data)
             .map_err(|_| TransportError::Stream("invalid SSE JSON".into()))?;
@@ -445,7 +445,7 @@ mod tests {
             "encrypted_content":"private reasoning", "output":"private body",
         }});
         let mut summary =
-            super::super::TransportFailureSummary::new(super::super::ResponseEnd::ProviderTerminal);
+            super::super::TransportObservation::new(super::super::ResponseEnd::ProviderTerminal);
         let error = ResponseAssembly::default()
             .accept_observed(&packet.to_string(), token, account, Some(&mut summary))
             .unwrap_err();
@@ -601,7 +601,7 @@ mod tests {
                 if let Some(raw) = &raw {
                     response["usage"] = raw.clone();
                 }
-                let mut observation = super::super::TransportFailureSummary::new(
+                let mut observation = super::super::TransportObservation::new(
                     super::super::ResponseEnd::ProviderTerminal,
                 );
                 let mut assembly = ResponseAssembly::default();
@@ -629,7 +629,7 @@ mod tests {
                     Some("high")
                 );
                 assert_eq!(observation.reported_max_output_tokens, Some(2048));
-                let restored: super::super::TransportFailureSummary =
+                let restored: super::super::TransportObservation =
                     serde_json::from_value(serde_json::to_value(&observation).unwrap()).unwrap();
                 assert_eq!(restored, observation);
                 if kind != "response.completed" {

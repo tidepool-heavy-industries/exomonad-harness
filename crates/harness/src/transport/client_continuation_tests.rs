@@ -30,7 +30,10 @@ struct NoAuth;
 impl Auth for NoAuth {
     fn admission(
         &self,
-    ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+    ) -> std::result::Result<
+        crate::transport::NativeTransportAdmission,
+        crate::transport::TransportError,
+    > {
         crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
             "/offline/synthetic-credential",
         ))
@@ -279,7 +282,7 @@ async fn http_eof_and_read_failure_retry_twice_then_success_reopen_preserves_onl
             .events(Some(&first))
             .unwrap()
             .into_iter()
-            .filter(|event| event.kind == "transport_failure_summary")
+            .filter(|event| event.kind == "responses_transport")
             .collect();
         assert_eq!(summaries.len(), 1);
         assert_eq!(

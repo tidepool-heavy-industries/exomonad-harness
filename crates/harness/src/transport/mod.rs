@@ -14,7 +14,7 @@ mod identity;
 pub use identity::SessionIdentity;
 mod observation;
 pub use observation::{
-    EventKind, IncompleteReason, ResponseEnd, ResponseTerminal, TransportFailureSummary,
+    EventKind, IncompleteReason, ResponseEnd, ResponseTerminal, TransportObservation,
 };
 mod request_failure;
 pub mod sse;
@@ -286,6 +286,8 @@ pub enum CredentialFailure {
     Unsafe,
     #[error("selected value is invalid")]
     Invalid,
+    #[error("credential worker failed")]
+    WorkerFailed,
 }
 
 /// An explicit provider failure event, distinct from local framing or schema
@@ -461,7 +463,7 @@ impl<A: Auth + Clone + 'static> ResponsesClient<A> {
         client::execute(
             self.auth.clone(),
             self.admission()?.clone(),
-            self.http()?,
+            self.http(),
             request,
             None,
         )
@@ -478,7 +480,7 @@ impl<A: Auth + Clone + 'static> ResponsesClient<A> {
         client::execute(
             self.auth.clone(),
             self.admission()?.clone(),
-            self.http()?,
+            self.http(),
             request,
             Some(sink),
         )

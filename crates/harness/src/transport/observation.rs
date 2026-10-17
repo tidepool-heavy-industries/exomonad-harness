@@ -93,13 +93,41 @@ pub enum ResponseEnd {
     ProtocolError,
     HttpRejected,
     SendFailed,
+    AuthenticationFailed,
+    AdmissionFailed,
+    /// The producer future was dropped; the caller owns why and effect cleanup.
+    Abandoned,
 }
 
 /// Metadata is not response provenance or permission to retry. The Engine's
 /// retained provider items, operations and failure assessment own those facts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TransportFailureSummary {
+pub struct TransportObservation {
     pub version: u8,
+    #[serde(default)]
+    pub requested_model: Option<String>,
+    #[serde(default)]
+    pub backend: Option<super::ResponsesRoute>,
+    #[serde(default)]
+    pub effective_reasoning: Option<crate::model::Effort>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub started_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub completed_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub queue_ms: Option<u64>,
+    #[serde(default)]
+    pub first_event_ms: Option<u64>,
+    #[serde(default)]
+    pub first_text_ms: Option<u64>,
+    #[serde(default)]
+    pub first_reasoning_ms: Option<u64>,
+    #[serde(default)]
+    pub total_ms: Option<u64>,
+    #[serde(default)]
+    pub dispatch_attempted: Option<bool>,
     #[serde(default)]
     pub usage: Option<super::Usage>,
     #[serde(default)]
@@ -147,10 +175,22 @@ fn push_kind(tail: &mut Vec<EventKind>, value: EventKind) {
     tail.push(value);
 }
 
-impl TransportFailureSummary {
+impl TransportObservation {
     pub(super) fn new(end: ResponseEnd) -> Self {
         Self {
-            version: 2,
+            version: 3,
+            requested_model: None,
+            backend: None,
+            effective_reasoning: None,
+            max_output_tokens: None,
+            started_at_unix_ms: None,
+            completed_at_unix_ms: None,
+            queue_ms: None,
+            first_event_ms: None,
+            first_text_ms: None,
+            first_reasoning_ms: None,
+            total_ms: None,
+            dispatch_attempted: None,
             usage: None,
             returned_model: None,
             returned_reasoning_effort: None,

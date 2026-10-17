@@ -11,7 +11,10 @@ struct Offline;
 impl Auth for Offline {
     fn admission(
         &self,
-    ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+    ) -> std::result::Result<
+        crate::transport::NativeTransportAdmission,
+        crate::transport::TransportError,
+    > {
         crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
             "/offline/synthetic-credential",
         ))
@@ -530,9 +533,7 @@ impl ResponsesTransport for MetadataThenFailure {
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let summary=serde_json::from_value(json!({"version":1,"body_elapsed_ms":0,"event_kind_tail":[],"sse_event_kind_tail":[],"unknown_event_count":0,"unframed_line_bytes":0,"unframed_data_bytes":0,"unframed_event_name":false,"metadata_truncated":false,"end":"provider_terminal"})).unwrap();
-        sink.send(StreamEvent::FailureSummary(summary))
-            .await
-            .unwrap();
+        sink.send(StreamEvent::Observation(summary)).await.unwrap();
         // Let the observer receive metadata before the native failure. A failing
         // diagnostic write must not replace the imminent provider outcome.
         tokio::task::yield_now().await;
@@ -547,7 +548,7 @@ async fn diagnostic_write_failure_preserves_provider_cause_in_inference_and_comp
     for compaction in [false, true] {
         let store = Arc::new(Store::memory().unwrap());
         // Explicit fault injection affects only diagnostic persistence.
-        store.lock().unwrap().execute_batch("CREATE TRIGGER diagnostic_failure BEFORE INSERT ON events WHEN NEW.kind='transport_failure_summary' BEGIN SELECT RAISE(FAIL,'injected diagnostic write failure'); END;").unwrap();
+        store.lock().unwrap().execute_batch("CREATE TRIGGER diagnostic_failure BEFORE INSERT ON events WHEN NEW.kind='responses_transport' BEGIN SELECT RAISE(FAIL,'injected diagnostic write failure'); END;").unwrap();
         let runner = Engine::<Offline, _, _>::with_transport(
             MetadataThenFailure,
             store.clone(),

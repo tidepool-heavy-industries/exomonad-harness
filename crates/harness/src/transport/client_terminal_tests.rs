@@ -1,7 +1,7 @@
 use super::*;
 use crate::transport::{
     EventKind, IncompleteReason, ResponseEnd, ResponseTerminal, StreamInterruption,
-    TransportFailureSummary,
+    TransportObservation,
 };
 use proptest::prelude::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -49,8 +49,8 @@ fn incomplete() -> Vec<u8> {
     format!("data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp-test\"}}}}\n\ndata: {{\"type\":\"response.incomplete\",\"response\":{{\"id\":\"resp-test\",\"incomplete_details\":{{\"reason\":\"max_output_tokens\"}},\"encrypted_content\":\"{TOKEN}\"}}}}\n\n").into_bytes()
 }
 
-fn summary(event: StreamEvent) -> TransportFailureSummary {
-    let StreamEvent::FailureSummary(summary) = event else {
+fn summary(event: StreamEvent) -> TransportObservation {
+    let StreamEvent::Observation(summary) = event else {
         panic!("expected failure metadata, not provider output");
     };
     summary
@@ -251,6 +251,12 @@ async fn http_terminal_precedes_malformed_tail_without_waiting_for_body_close() 
         .unwrap();
         if completed {
             assert_eq!(result.unwrap().response_id, "resp-λ");
+            let observation = summary(rx.recv().await.unwrap());
+            assert_eq!(observation.terminal, Some(ResponseTerminal::Completed));
+            assert_eq!(observation.end, ResponseEnd::ProviderTerminal);
+            assert_eq!(observation.backend, None);
+            assert_eq!(observation.queue_ms, None);
+            assert_eq!(observation.total_ms, None);
             assert!(rx.recv().await.is_none());
         } else {
             assert!(matches!(
@@ -273,7 +279,7 @@ async fn http_terminal_precedes_malformed_tail_without_waiting_for_body_close() 
 
 #[test]
 fn unknown_event_retention_is_fixed_size_and_never_copies_provider_labels() {
-    let mut summary = TransportFailureSummary::new(ResponseEnd::CleanEof);
+    let mut summary = TransportObservation::new(ResponseEnd::CleanEof);
     for _ in 0..100 {
         summary.event(EventKind::from_provider(Some(
             &"private-label-λ".repeat(1000),

@@ -427,7 +427,7 @@ impl SseFramer {
         Ok(event)
     }
 
-    fn observe_tail(&self, summary: &mut super::TransportFailureSummary) {
+    fn observe_tail(&self, summary: &mut super::TransportObservation) {
         // WHATWG requires discarding this unfinished event at EOF. Retain only
         // its lengths; never promote partial JSON or arguments into an item.
         summary.unframed_line_bytes = self.line.len() as u64;
@@ -493,13 +493,134 @@ pub(super) fn http_client_with_limits(
         .map_err(|_| TransportError::Stream("HTTP client initialization failed".into()))
 }
 
-/// Runs the stateless streaming request. Auth disk access happens in a
-/// blocking-pool task, never on an async executor worker. No credential value
-/// is included in errors, traces, stored items, or returned data.
+fn observed_utc_ms() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64)
+}
+
+/// Request metadata shares the existing provider stream and its bounded capacity.
+/// One reserved slot lets cancellation publish synchronously without another task
+/// or a second journal. Engine drops the producer before draining that tail.
+struct ObservationGuard {
+    observation: Option<super::TransportObservation>,
+    reserved: Option<tokio::sync::mpsc::OwnedPermit<StreamEvent>>,
+    started: Option<std::time::Instant>,
+    body_started: Option<std::time::Instant>,
+    queued: Option<std::time::Instant>,
+}
+impl ObservationGuard {
+    async fn new(
+        sink: &Option<tokio::sync::mpsc::Sender<StreamEvent>>,
+        request: Option<(&ResponsesRequest, &super::NativeTransportContract)>,
+    ) -> Self {
+        let started = request.map(|_| std::time::Instant::now());
+        let mut summary = super::TransportObservation::new(super::ResponseEnd::Abandoned);
+        if let Some((request, contract)) = request {
+            let (model, truncated) = super::observation::metadata(&request.model, "", "");
+            summary.requested_model = Some(model);
+            summary.metadata_truncated |= truncated;
+            summary.backend = Some(contract.route);
+            summary.effective_reasoning = Some(crate::item::Item::effective_effort(
+                &request.input,
+                request.pinned_effort,
+            ));
+            summary.max_output_tokens = contract.limits.max_output_tokens;
+            summary.started_at_unix_ms = observed_utc_ms();
+            summary.dispatch_attempted = Some(false);
+        }
+        let reserved = match sink {
+            Some(sender) => sender.clone().reserve_owned().await.ok(),
+            None => None,
+        };
+        Self {
+            observation: Some(summary),
+            reserved,
+            started,
+            body_started: None,
+            queued: None,
+        }
+    }
+    fn summary(&mut self) -> &mut super::TransportObservation {
+        self.observation.as_mut().expect("active observation")
+    }
+    fn elapsed_ms(&self) -> Option<u64> {
+        self.started
+            .map(|started| started.elapsed().as_millis().min(u64::MAX as u128) as u64)
+    }
+    fn headers(&mut self, response: &reqwest::Response, token: &str, account: &str) {
+        let headers = super::TransportObservation::response(response, token, account);
+        self.summary().http_status = headers.http_status;
+        self.summary().server_request_id = headers.server_request_id;
+        self.summary().content_type = headers.content_type;
+        self.summary().metadata_truncated |= headers.metadata_truncated;
+    }
+    fn visible_event(&mut self, event: &StreamEvent) {
+        use super::sse::OutputChannel;
+        let (text, reasoning) = match event {
+            StreamEvent::Delta { channel, text, .. } => (
+                !text.is_empty() && *channel == OutputChannel::Assistant,
+                !text.is_empty() && *channel == OutputChannel::Reasoning,
+            ),
+            StreamEvent::CompletedItem(done) => {
+                let item = &done.item().0;
+                let has = |kind| {
+                    item["content"].as_array().is_some_and(|parts| {
+                        parts.iter().any(|part| {
+                            part["type"] == kind
+                                && part["text"].as_str().is_some_and(|text| !text.is_empty())
+                        })
+                    })
+                };
+                (
+                    item["type"] == "message" && item["role"] == "assistant" && has("output_text"),
+                    item["type"] == "reasoning" && has("reasoning_text"),
+                )
+            }
+            StreamEvent::Observation(_) => (false, false),
+        };
+        let elapsed = self.elapsed_ms();
+        if text && self.summary().first_text_ms.is_none() {
+            self.summary().first_text_ms = elapsed;
+        }
+        if reasoning && self.summary().first_reasoning_ms.is_none() {
+            self.summary().first_reasoning_ms = elapsed;
+        }
+    }
+    fn publish(&mut self) {
+        let Some(mut summary) = self.observation.take() else {
+            return;
+        };
+        if let Some(started) = self.started {
+            summary.total_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+            summary.completed_at_unix_ms = observed_utc_ms();
+            if summary.queue_ms.is_none() {
+                summary.queue_ms = self
+                    .queued
+                    .map(|queued| queued.elapsed().as_millis().min(u64::MAX as u128) as u64);
+            }
+        }
+        if let Some(started) = self.body_started {
+            summary.body_elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        }
+        if let Some(reserved) = self.reserved.take() {
+            reserved.send(StreamEvent::Observation(summary));
+        }
+    }
+}
+impl Drop for ObservationGuard {
+    fn drop(&mut self) {
+        self.publish();
+    }
+}
+
+/// Auth lookup and HTTP begin only after exact prepared-contract comparison and
+/// inference admission. Cancellation retains facts; it never proves completion.
 pub(super) async fn execute<A: Auth + Clone + 'static>(
     auth: A,
     admission: super::NativeTransportAdmission,
-    http: reqwest::Client,
+    http: Result<reqwest::Client, TransportError>,
     prepared: super::PreparedProviderRequest,
     sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
 ) -> Result<ResponsesTurn, TransportError> {
@@ -511,53 +632,64 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
     {
         return Err(TransportError::PreparedSelectionMismatch);
     }
-    // Queue cancellation drops this future before any credential access or send.
-    // The permit remains owned until terminal response processing or cancellation.
-    let _permit = admission.acquire().await?;
+    let mut observation =
+        ObservationGuard::new(&sink, Some((prepared.request(), admission.contract()))).await;
+    let http = match http {
+        Ok(http) => http,
+        Err(error) => {
+            observation.summary().end = super::ResponseEnd::AdmissionFailed;
+            return Err(error);
+        }
+    };
+    observation.queued = Some(std::time::Instant::now());
+    let _permit = match admission.acquire().await {
+        Ok(permit) => permit,
+        Err(error) => {
+            observation.summary().end = super::ResponseEnd::AdmissionFailed;
+            return Err(error);
+        }
+    };
+    observation.summary().queue_ms = observation
+        .queued
+        .map(|queued| queued.elapsed().as_millis().min(u64::MAX as u128) as u64);
     let (request, body, _) = prepared.into_dispatch_parts();
-    let token = tokio::task::spawn_blocking(move || auth.access())
-        .await
-        .map_err(|_| TransportError::Authentication)??;
+    let token = match tokio::task::spawn_blocking(move || auth.access()).await {
+        Ok(Ok(token)) => token,
+        Ok(Err(error)) => {
+            observation.summary().end = super::ResponseEnd::AuthenticationFailed;
+            return Err(error);
+        }
+        Err(_) => {
+            observation.summary().end = super::ResponseEnd::AuthenticationFailed;
+            return Err(TransportError::CredentialUnavailable {
+                route: admission.contract().route,
+                reason: super::CredentialFailure::WorkerFailed,
+            });
+        }
+    };
     let call = native_http_request(&http, &request, body, &token, admission.contract());
+    observation.summary().dispatch_attempted = Some(true);
     let response = match call.send().await {
         Ok(response) => response,
         Err(_) => {
-            return failure_summary(
-                &sink,
-                super::TransportFailureSummary::new(super::ResponseEnd::SendFailed),
-                TransportError::Stream("HTTP request failed".into()),
-            )
-            .await;
+            observation.summary().end = super::ResponseEnd::SendFailed;
+            return Err(TransportError::Stream("HTTP request failed".into()));
         }
     };
+    observation.headers(&response, &token, "");
     let status = response.status().as_u16();
-    if status == 401 {
-        let summary = super::TransportFailureSummary::response(&response, &token, "");
-        let error = match admission.contract().route {
-            ResponsesRoute::ChatGptPlan => TransportError::Authentication,
-            route => TransportError::ProviderAuthentication { route },
-        };
-        return failure_summary(&sink, summary, error).await;
-    }
     if status != 200 {
-        let summary = super::TransportFailureSummary::response(&response, &token, "");
+        observation.summary().end = super::ResponseEnd::HttpRejected;
+        if status == 401 {
+            return Err(match admission.contract().route {
+                ResponsesRoute::ChatGptPlan => TransportError::Authentication,
+                route => TransportError::ProviderAuthentication { route },
+            });
+        }
         let diagnostic = super::http_error::read(response, &token, "").await;
-        return failure_summary(&sink, summary, TransportError::Http { status, diagnostic }).await;
+        return Err(TransportError::Http { status, diagnostic });
     }
-    read_response(response, sink, &token, "").await
-}
-
-async fn failure_summary(
-    sink: &Option<tokio::sync::mpsc::Sender<StreamEvent>>,
-    summary: super::TransportFailureSummary,
-    error: TransportError,
-) -> Result<ResponsesTurn, TransportError> {
-    if let Some(sender) = sink {
-        // The Engine consumes this same bounded stream and drains its tail on
-        // failure. Closure means the observer stopped; never replace the cause.
-        let _ = sender.send(StreamEvent::FailureSummary(summary)).await;
-    }
-    Err(error)
+    read_response_observed(response, sink, &token, "", &mut observation).await
 }
 
 async fn read_response(
@@ -566,12 +698,24 @@ async fn read_response(
     token: &str,
     account: &str,
 ) -> Result<ResponsesTurn, TransportError> {
-    use super::{ResponseEnd, TransportFailureSummary};
+    let mut observation = ObservationGuard::new(&sink, None).await;
+    read_response_observed(response, sink, token, account, &mut observation).await
+}
+
+async fn read_response_observed(
+    response: reqwest::Response,
+    sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
+    token: &str,
+    account: &str,
+    observation: &mut ObservationGuard,
+) -> Result<ResponsesTurn, TransportError> {
+    use super::ResponseEnd;
     let started = std::time::Instant::now();
-    let mut summary = TransportFailureSummary::response(&response, token, account);
-    summary.received_bytes = Some(0);
-    summary.received_chunks = Some(0);
-    summary.framed_events = Some(0);
+    observation.headers(&response, token, account);
+    observation.body_started = Some(started);
+    observation.summary().received_bytes = Some(0);
+    observation.summary().received_chunks = Some(0);
+    observation.summary().framed_events = Some(0);
     let mut stream = response.bytes_stream();
     let mut framer = SseFramer::new();
     let mut assembly = ResponseAssembly::default();
@@ -597,26 +741,33 @@ async fn read_response(
                 );
             }
         };
-        if !chunk.is_empty() && summary.first_byte_ms.is_none() {
-            summary.first_byte_ms = Some(started.elapsed().as_millis() as u64);
+        if !chunk.is_empty() && observation.summary().first_byte_ms.is_none() {
+            observation.summary().first_byte_ms = Some(started.elapsed().as_millis() as u64);
         }
-        *summary.received_bytes.as_mut().unwrap() += chunk.len() as u64;
-        *summary.received_chunks.as_mut().unwrap() += 1;
+        *observation.summary().received_bytes.as_mut().unwrap() += chunk.len() as u64;
+        *observation.summary().received_chunks.as_mut().unwrap() += 1;
         let (events, framing_error) = framer.push(&chunk);
         for frame in events {
-            *summary.framed_events.as_mut().unwrap() += 1;
-            if let Some(name) = &frame.event_name {
-                summary.sse_event(super::EventKind::from_provider(Some(name)));
+            if observation.summary().first_event_ms.is_none() {
+                observation.summary().first_event_ms = observation.elapsed_ms();
             }
-            match assembly.accept_observed(&frame.data, token, account, Some(&mut summary)) {
+            *observation.summary().framed_events.as_mut().unwrap() += 1;
+            if let Some(name) = &frame.event_name {
+                observation
+                    .summary()
+                    .sse_event(super::EventKind::from_provider(Some(name)));
+            }
+            match assembly.accept_observed(&frame.data, token, account, Some(observation.summary()))
+            {
                 Ok(Some(event)) => {
+                    observation.visible_event(&event);
                     if let Some(sender) = &sink {
                         let _ = sender.send(event).await;
                     }
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    let end = if summary.terminal.is_some() {
+                    let end = if observation.summary().terminal.is_some() {
                         ResponseEnd::ProviderTerminal
                     } else {
                         ResponseEnd::ProtocolError
@@ -632,15 +783,9 @@ async fn read_response(
             break (Err(error), ResponseEnd::ProtocolError);
         }
     };
-    match result {
-        Ok(turn) => Ok(turn),
-        Err(error) => {
-            summary.end = end;
-            summary.body_elapsed_ms = started.elapsed().as_millis() as u64;
-            framer.observe_tail(&mut summary);
-            failure_summary(&sink, summary, error).await
-        }
-    }
+    observation.summary().end = end;
+    framer.observe_tail(observation.summary());
+    result
 }
 
 #[cfg(test)]
