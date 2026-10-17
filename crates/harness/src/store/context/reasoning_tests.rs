@@ -187,6 +187,18 @@ fn reasoning_is_readable_but_not_editable_for_other_routes_or_unknown_continuity
             Some(("encrypted_content", json!("secret"))),
         ),
         (ResponsesRoute::DeepSeek, Some(("future", json!(true)))),
+        (ResponsesRoute::DeepSeek, Some(("summary", json!(null)))),
+        (
+            ResponsesRoute::DeepSeek,
+            Some((
+                "summary",
+                json!([{"type":"summary_text","text":"not empty"}]),
+            )),
+        ),
+        (
+            ResponsesRoute::DeepSeek,
+            Some(("summary", json!("invalid"))),
+        ),
     ] {
         let store = Store::memory().unwrap();
         let mut item = Item(
@@ -375,4 +387,71 @@ fn interrupted_plaintext_reasoning_is_readable_without_edit_authority() {
     let observed = fields(&snapshot);
     assert_eq!(observed[0].text, "partial response");
     assert!(!observed[0].editable);
+}
+
+#[test]
+fn effective_selection_reads_current_owner_head_and_final_positional_pin() {
+    let store = Store::memory().unwrap();
+    let actor = AgentPath("/root".into());
+    let identity = store.standalone_identity(actor.clone());
+    assert!(
+        store
+            .effective_inference_selection(&identity, "default", Effort::High)
+            .is_err()
+    );
+    store
+        .admit_agent(&actor, None, None, &json!({}), &json!({}))
+        .unwrap();
+    let empty = store
+        .effective_inference_selection(&identity, "default", Effort::High)
+        .unwrap();
+    assert_eq!(
+        (empty.head, empty.model, empty.effort),
+        (None, "default".into(), Effort::High)
+    );
+    let old = RequestId("old-selection".into());
+    store
+        .write_request(
+            &old,
+            None,
+            "/root",
+            &[Item::configuration_update(Effort::Low)],
+            Usage::default(),
+        )
+        .unwrap();
+    store.advance_agent_head(&actor, None, Some(&old)).unwrap();
+    store
+        .initialize_context_target(
+            &identity,
+            &ContextProjectionTarget {
+                model: "selected".into(),
+                route: ResponsesRoute::DeepSeek,
+                protocol: ResponsesProtocol::Standard,
+            },
+        )
+        .unwrap();
+    let current = RequestId("current-selection".into());
+    store
+        .write_request(
+            &current,
+            Some(&old),
+            "/root",
+            &[
+                Item::user_text("unrelated"),
+                Item::configuration_update(Effort::High),
+                Item::configuration_update(Effort::Max),
+            ],
+            Usage::default(),
+        )
+        .unwrap();
+    store
+        .advance_agent_head(&actor, Some(&old), Some(&current))
+        .unwrap();
+    let observed = store
+        .effective_inference_selection(&identity, "stale-default", Effort::None)
+        .unwrap();
+    assert_eq!(
+        (observed.head, observed.model, observed.effort),
+        (Some(current), "selected".into(), Effort::Max)
+    );
 }
