@@ -4973,6 +4973,10 @@ fn is_final(
             }) && turn.items.iter().any(|item| {
                 item.0["type"] == "message"
                     && item.0["role"] == "assistant"
+                    && item
+                        .0
+                        .get("status")
+                        .is_none_or(|status| status == "completed")
                     && item.0["content"].as_array().is_some_and(|content| {
                         content
                             .iter()
@@ -5001,6 +5005,28 @@ mod response_finality_tests {
         assert!(!is_final(&turn, false, ExplicitPhase));
         assert!(!is_final(&turn, true, CompletedAssistantText));
         assert!(message.0.get("phase").is_none());
+        for status in ["in_progress", "incomplete"] {
+            let mut partial = message.clone();
+            partial.0["status"] = json!(status);
+            assert!(!is_final(
+                &ResponsesTurn {
+                    items: vec![partial],
+                    ..turn.clone()
+                },
+                false,
+                CompletedAssistantText
+            ));
+        }
+        let mut completed = message.clone();
+        completed.0["status"] = json!("completed");
+        assert!(is_final(
+            &ResponsesTurn {
+                items: vec![completed],
+                ..turn.clone()
+            },
+            false,
+            CompletedAssistantText
+        ));
         turn.items.push(Item(
             json!({"type":"function_call","name":"tool","call_id":"call","arguments":"{}"}),
         ));
@@ -5112,8 +5138,10 @@ mod tests {
     impl Auth for FakeAuth {
         fn admission(
             &self,
-        ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError>
-        {
+        ) -> std::result::Result<
+            crate::transport::NativeTransportAdmission,
+            crate::transport::TransportError,
+        > {
             crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
                 "/offline/synthetic-credential",
             ))
