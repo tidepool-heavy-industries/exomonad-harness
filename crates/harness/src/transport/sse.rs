@@ -56,8 +56,6 @@ pub enum OutputChannel {
 #[derive(Debug)]
 pub enum StreamEvent {
     CompletedItem(CompletedOutputItem),
-    /// Bounded diagnostics, never a completed output item or dispatch authority.
-    Observation(super::TransportObservation),
     Delta {
         item_id: String,
         channel: OutputChannel,

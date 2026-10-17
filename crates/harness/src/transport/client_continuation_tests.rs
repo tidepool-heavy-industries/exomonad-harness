@@ -107,7 +107,7 @@ impl ResponsesTransport for HttpScript {
     }
     async fn create_streaming(
         &self,
-        request: PreparedProviderRequest,
+        mut request: PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         self.requests.lock().unwrap().push((
@@ -145,9 +145,10 @@ impl ResponsesTransport for HttpScript {
             }
         });
         let response = reqwest::get(format!("http://{address}")).await.unwrap();
+        let observation = request.take_observation_publisher();
         if buffered_tail {
             let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-            let result = read_response(response, Some(tx), "", "").await;
+            let result = read_response(response, Some(tx), "", "", observation).await;
             // The real parser finishes before Engine sees any event. Forwarding
             // these bounded facts and returning failure complete in one poll.
             while let Ok(event) = rx.try_recv() {
@@ -155,7 +156,7 @@ impl ResponsesTransport for HttpScript {
             }
             result
         } else {
-            read_response(response, Some(sink), "", "").await
+            read_response(response, Some(sink), "", "", observation).await
         }
     }
 }
@@ -236,6 +237,52 @@ fn block(store: &Store, identity: &HostIdentity) -> crate::embedding::InferenceB
         panic!("expected blocked")
     };
     block
+}
+
+#[tokio::test]
+async fn http_component_success_persists_one_request_owned_observation() {
+    let store = Arc::new(Store::memory().unwrap());
+    let (runner, _, script, effects) = setup(store.clone(), vec![Reply::complete()]);
+    let (_cancel, cancellation) = watch::channel(false);
+    let completed = runner
+        .run_embedded(None, vec![Item::user_text("once")], cancellation, mailbox())
+        .await
+        .unwrap();
+    assert_eq!(effects.0.load(Ordering::SeqCst), 0);
+    let requests = script.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(completed.head_request, requests[0].0);
+    let observations: Vec<_> = store
+        .events(Some(&requests[0].0))
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "responses_transport")
+        .collect();
+    assert_eq!(observations.len(), 1);
+    let observed: crate::transport::TransportObservation =
+        serde_json::from_str(&observations[0].payload).unwrap();
+    assert_eq!(
+        observed.terminal,
+        Some(crate::transport::ResponseTerminal::Completed)
+    );
+    assert_eq!(
+        observed.end,
+        crate::transport::ResponseEnd::ProviderTerminal
+    );
+    assert_eq!(observed.http_status, Some(200));
+    assert_eq!(observed.response_created_id, None);
+    assert!(observed.received_bytes.unwrap() > 0);
+    assert_eq!(observed.framed_events, Some(2));
+    assert_eq!(
+        observed.usage.unwrap().raw,
+        crate::transport::RawUsage::Unavailable
+    );
+    // The real HTTP reader cannot invent native admission/request facts for
+    // this explicitly component-backed transport.
+    assert_eq!(observed.backend, None);
+    assert_eq!(observed.requested_model, None);
+    assert_eq!(observed.dispatch_attempted, None);
+    assert_eq!(observed.total_ms, None);
 }
 
 #[tokio::test]

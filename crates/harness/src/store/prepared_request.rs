@@ -43,9 +43,24 @@ pub struct PreparedProviderRequest {
     body: client::NormalizedProviderBody,
     selection: PreparedTransportSelection,
     issued: IssuedProviderRequest,
+    observation_tx: Option<tokio::sync::oneshot::Sender<crate::transport::TransportObservation>>,
+    observation_rx: Option<tokio::sync::oneshot::Receiver<crate::transport::TransportObservation>>,
 }
 
 impl PreparedProviderRequest {
+    /// Transfer this issued request's diagnostic receipt once. A closed receipt
+    /// means no observation was published; it does not establish completion.
+    /// This channel is independent of bounded provider-output backpressure.
+    pub fn take_transport_observation(
+        &mut self,
+    ) -> Option<tokio::sync::oneshot::Receiver<crate::transport::TransportObservation>> {
+        self.observation_rx.take()
+    }
+    pub(crate) fn take_observation_publisher(
+        &mut self,
+    ) -> Option<tokio::sync::oneshot::Sender<crate::transport::TransportObservation>> {
+        self.observation_tx.take()
+    }
     pub fn request(&self) -> &ResponsesRequest {
         &self.request
     }
@@ -187,11 +202,14 @@ impl Store {
         sealed.record.purpose = Some(purpose);
         sealed.record.native_transport = selection.native_admission().map(|a| a.contract().clone());
         let issued = self.issue_provider_request(local, sealed, contract)?;
+        let (observation_tx, observation_rx) = tokio::sync::oneshot::channel();
         Ok(PreparedProviderRequest {
             request,
             body,
             selection,
             issued,
+            observation_tx: Some(observation_tx),
+            observation_rx: Some(observation_rx),
         })
     }
 }

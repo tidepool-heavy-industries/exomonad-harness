@@ -241,16 +241,79 @@ async fn deepseek_contract_mismatch_precedes_credentials_and_queue_cancellation_
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let queued = RequestId("queued".into());
     store.create_request(&queued, None, "/root").unwrap();
-    let prepared = prepare(&store, &queued, request(), selected.clone());
+    let mut prepared = prepare(&store, &queued, request(), selected.clone());
+    let observation = prepared.take_transport_observation().unwrap();
+    assert!(prepared.take_transport_observation().is_none());
     let held = selected.acquire().await.unwrap();
     let second_client = ResponsesClient::new(auth);
     let mut pending = Box::pin(second_client.create(prepared));
     assert!(futures_util::poll!(&mut pending).is_pending());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     drop(pending);
+    let observed = observation.await.unwrap();
+    assert_eq!(observed.end, super::super::ResponseEnd::Abandoned);
+    assert_eq!(observed.backend, Some(ResponsesRoute::DeepSeek));
+    assert_eq!(observed.dispatch_attempted, Some(false));
+    assert_eq!(observed.terminal, None);
+    assert!(observed.queue_ms.is_some());
+    assert_eq!(observed.first_event_ms, None);
+    assert_eq!(observed.usage, None);
     drop(held);
     let _released = selected.acquire().await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[derive(Clone)]
+struct PanickingAuth(NativeTransportAdmission);
+impl Auth for PanickingAuth {
+    fn admission(&self) -> Result<NativeTransportAdmission, TransportError> {
+        Ok(self.0.clone())
+    }
+    fn access(&self) -> Result<String, TransportError> {
+        panic!("synthetic credential worker failure")
+    }
+}
+
+#[tokio::test]
+async fn credential_worker_failure_preserves_route_error_and_observation_without_dispatch() {
+    for route in [ResponsesRoute::ChatGptPlan, ResponsesRoute::DeepSeek] {
+        let mut contract = admission("/offline/synthetic-key").contract().clone();
+        contract.route = route;
+        if route == ResponsesRoute::ChatGptPlan {
+            contract.endpoint = CHATGPT_PLAN_ENDPOINT.into();
+            contract.limits = InferenceLimits::chatgpt_default();
+        }
+        let selected = NativeTransportAdmission::rehydrate(contract).unwrap();
+        let store = Store::memory().unwrap();
+        let head = RequestId(format!("worker-failure-{route:?}"));
+        store.create_request(&head, None, "/root").unwrap();
+        let mut prepared = prepare(&store, &head, request(), selected.clone());
+        let receipt = prepared.take_transport_observation().unwrap();
+        let error = ResponsesClient::new(PanickingAuth(selected))
+            .create(prepared)
+            .await
+            .unwrap_err();
+        match route {
+            ResponsesRoute::ChatGptPlan => assert!(matches!(error, TransportError::Authentication)),
+            ResponsesRoute::DeepSeek => assert!(matches!(
+                error,
+                TransportError::CredentialUnavailable {
+                    route: ResponsesRoute::DeepSeek,
+                    reason: super::super::CredentialFailure::WorkerFailed
+                }
+            )),
+        }
+        let observed = receipt.await.unwrap();
+        assert_eq!(
+            observed.end,
+            super::super::ResponseEnd::AuthenticationFailed
+        );
+        assert_eq!(observed.backend, Some(route));
+        assert_eq!(observed.dispatch_attempted, Some(false));
+        assert_eq!(observed.terminal, None);
+        assert_eq!(observed.usage, None);
+        assert!(observed.total_ms.is_some());
+    }
 }
 
 #[test]

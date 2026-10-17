@@ -25,8 +25,10 @@ async fn exchange(
     impl Auth for FixtureAuth {
         fn admission(
             &self,
-        ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError>
-        {
+        ) -> std::result::Result<
+            crate::transport::NativeTransportAdmission,
+            crate::transport::TransportError,
+        > {
             crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
                 "/offline/synthetic-credential",
             ))
@@ -110,7 +112,7 @@ async fn exchange(
         .unwrap();
     *built.url_mut() = format!("http://{address}/responses").parse().unwrap();
     let response = http.execute(built).await.unwrap();
-    let turn = read_response(response, None, "fixture-token", "fixture-account")
+    let turn = read_response(response, None, "fixture-token", "fixture-account", None)
         .await
         .unwrap();
     store.record_provider_turn(&issuer, &turn).unwrap();

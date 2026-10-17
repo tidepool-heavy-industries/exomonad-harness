@@ -23,7 +23,10 @@ struct Offline;
 impl Auth for Offline {
     fn admission(
         &self,
-    ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+    ) -> std::result::Result<
+        crate::transport::NativeTransportAdmission,
+        crate::transport::TransportError,
+    > {
         crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
             "/offline/synthetic-credential",
         ))
@@ -54,7 +57,7 @@ impl ResponsesTransport for SseFailure {
     async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let response = http_client().unwrap().get(&self.url).send().await.unwrap();
-        read_response(response, None, TOKEN, ACCOUNT).await
+        read_response(response, None, TOKEN, ACCOUNT, None).await
     }
 }
 

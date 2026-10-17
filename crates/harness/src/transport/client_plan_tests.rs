@@ -386,8 +386,10 @@ async fn missing_plan_credentials_are_refused_before_traffic() {
     impl Auth for WrongAuthority {
         fn admission(
             &self,
-        ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError>
-        {
+        ) -> std::result::Result<
+            crate::transport::NativeTransportAdmission,
+            crate::transport::TransportError,
+        > {
             crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
                 "/offline/synthetic-credential",
             ))
@@ -621,7 +623,9 @@ async fn saved_account_switch_during_held_stream_preserves_sent_authentication()
         .unwrap();
         *wire.url_mut() = reqwest::Url::parse(&format!("http://{address}/responses")).unwrap();
         let response = http.execute(wire).await.unwrap();
-        read_response(response, None, &token, "").await.unwrap()
+        read_response(response, None, &token, "", None)
+            .await
+            .unwrap()
     }
     let first_auth = auth.clone();
     let first = tokio::spawn(async move { submit(first_auth, address).await });

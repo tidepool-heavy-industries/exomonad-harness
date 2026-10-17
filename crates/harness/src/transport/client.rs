@@ -500,19 +500,18 @@ fn observed_utc_ms() -> Option<u64> {
         .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64)
 }
 
-/// Request metadata shares the existing provider stream and its bounded capacity.
-/// One reserved slot lets cancellation publish synchronously without another task
-/// or a second journal. Engine drops the producer before draining that tail.
+/// One request-owned receipt publishes diagnostics synchronously on producer
+/// drop, independently of provider-output backpressure and without another task.
 struct ObservationGuard {
     observation: Option<super::TransportObservation>,
-    reserved: Option<tokio::sync::mpsc::OwnedPermit<StreamEvent>>,
+    publisher: Option<tokio::sync::oneshot::Sender<super::TransportObservation>>,
     started: Option<std::time::Instant>,
     body_started: Option<std::time::Instant>,
     queued: Option<std::time::Instant>,
 }
 impl ObservationGuard {
-    async fn new(
-        sink: &Option<tokio::sync::mpsc::Sender<StreamEvent>>,
+    fn new(
+        publisher: Option<tokio::sync::oneshot::Sender<super::TransportObservation>>,
         request: Option<(&ResponsesRequest, &super::NativeTransportContract)>,
     ) -> Self {
         let started = request.map(|_| std::time::Instant::now());
@@ -530,13 +529,9 @@ impl ObservationGuard {
             summary.started_at_unix_ms = observed_utc_ms();
             summary.dispatch_attempted = Some(false);
         }
-        let reserved = match sink {
-            Some(sender) => sender.clone().reserve_owned().await.ok(),
-            None => None,
-        };
         Self {
             observation: Some(summary),
-            reserved,
+            publisher,
             started,
             body_started: None,
             queued: None,
@@ -578,7 +573,6 @@ impl ObservationGuard {
                     item["type"] == "reasoning" && has("reasoning_text"),
                 )
             }
-            StreamEvent::Observation(_) => (false, false),
         };
         let elapsed = self.elapsed_ms();
         if text && self.summary().first_text_ms.is_none() {
@@ -604,8 +598,8 @@ impl ObservationGuard {
         if let Some(started) = self.body_started {
             summary.body_elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         }
-        if let Some(reserved) = self.reserved.take() {
-            reserved.send(StreamEvent::Observation(summary));
+        if let Some(publisher) = self.publisher.take() {
+            let _ = publisher.send(summary);
         }
     }
 }
@@ -621,7 +615,7 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
     auth: A,
     admission: super::NativeTransportAdmission,
     http: Result<reqwest::Client, TransportError>,
-    prepared: super::PreparedProviderRequest,
+    mut prepared: super::PreparedProviderRequest,
     sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
 ) -> Result<ResponsesTurn, TransportError> {
     if prepared
@@ -632,8 +626,10 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
     {
         return Err(TransportError::PreparedSelectionMismatch);
     }
-    let mut observation =
-        ObservationGuard::new(&sink, Some((prepared.request(), admission.contract()))).await;
+    let mut observation = ObservationGuard::new(
+        prepared.take_observation_publisher(),
+        Some((prepared.request(), admission.contract())),
+    );
     let http = match http {
         Ok(http) => http,
         Err(error) => {
@@ -661,9 +657,12 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
         }
         Err(_) => {
             observation.summary().end = super::ResponseEnd::AuthenticationFailed;
-            return Err(TransportError::CredentialUnavailable {
-                route: admission.contract().route,
-                reason: super::CredentialFailure::WorkerFailed,
+            return Err(match admission.contract().route {
+                ResponsesRoute::ChatGptPlan => TransportError::Authentication,
+                route => TransportError::CredentialUnavailable {
+                    route,
+                    reason: super::CredentialFailure::WorkerFailed,
+                },
             });
         }
     };
@@ -692,13 +691,15 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
     read_response_observed(response, sink, &token, "", &mut observation).await
 }
 
+#[cfg(test)]
 async fn read_response(
     response: reqwest::Response,
     sink: Option<tokio::sync::mpsc::Sender<StreamEvent>>,
     token: &str,
     account: &str,
+    publisher: Option<tokio::sync::oneshot::Sender<super::TransportObservation>>,
 ) -> Result<ResponsesTurn, TransportError> {
-    let mut observation = ObservationGuard::new(&sink, None).await;
+    let mut observation = ObservationGuard::new(publisher, None);
     read_response_observed(response, sink, token, account, &mut observation).await
 }
 
@@ -1030,7 +1031,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        let failure = read_response(response, None, token, account)
+        let failure = read_response(response, None, token, account, None)
             .await
             .unwrap_err();
         server.await.unwrap();
@@ -1074,7 +1075,7 @@ mod tests {
                 .send()
                 .await
                 .unwrap();
-            let result = read_response(response, None, "", "").await;
+            let result = read_response(response, None, "", "", None).await;
             server.await.unwrap();
             match (completed, truncated, result) {
                 (true, _, Ok(turn)) => assert_eq!(turn.response_id, "terminal-proof"),

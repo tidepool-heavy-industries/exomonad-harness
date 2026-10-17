@@ -1,4 +1,4 @@
-//! Bounded native response metadata, delivered through the existing provider stream.
+//! Bounded native response metadata, delivered through the issued request receipt.
 use super::http_error;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -119,10 +119,13 @@ pub struct TransportObservation {
     #[serde(default)]
     pub queue_ms: Option<u64>,
     #[serde(default)]
+    /// Monotonic elapsed from request observation start, including queue/auth.
     pub first_event_ms: Option<u64>,
     #[serde(default)]
+    /// Monotonic elapsed from request observation start, including queue/auth.
     pub first_text_ms: Option<u64>,
     #[serde(default)]
+    /// Monotonic elapsed from request observation start, including queue/auth.
     pub first_reasoning_ms: Option<u64>,
     #[serde(default)]
     pub total_ms: Option<u64>,
@@ -141,6 +144,7 @@ pub struct TransportObservation {
     pub content_type: Option<String>,
     pub response_created_id: Option<String>,
     pub body_elapsed_ms: u64,
+    /// Monotonic elapsed from response-body reading start, excluding queue/auth.
     pub first_byte_ms: Option<u64>,
     pub received_bytes: Option<u64>,
     pub received_chunks: Option<u64>,

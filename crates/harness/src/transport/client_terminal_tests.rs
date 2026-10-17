@@ -49,22 +49,16 @@ fn incomplete() -> Vec<u8> {
     format!("data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp-test\"}}}}\n\ndata: {{\"type\":\"response.incomplete\",\"response\":{{\"id\":\"resp-test\",\"incomplete_details\":{{\"reason\":\"max_output_tokens\"}},\"encrypted_content\":\"{TOKEN}\"}}}}\n\n").into_bytes()
 }
 
-fn summary(event: StreamEvent) -> TransportObservation {
-    let StreamEvent::Observation(summary) = event else {
-        panic!("expected failure metadata, not provider output");
-    };
-    summary
-}
-
 #[tokio::test]
 async fn explicit_incomplete_stops_before_eof_and_delivers_metadata_before_stream_close() {
     let body = incomplete();
     let bytes = body.len() as u64;
     let (response, release, server) = response(body, false, true).await;
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let (observation_tx, observation_rx) = tokio::sync::oneshot::channel();
     let error = tokio::time::timeout(
         Duration::from_secs(2),
-        read_response(response, Some(tx), TOKEN, ACCOUNT),
+        read_response(response, Some(tx), TOKEN, ACCOUNT, Some(observation_tx)),
     )
     .await
     .expect("explicit terminal must not await EOF or the HTTP body timeout")
@@ -77,7 +71,7 @@ async fn explicit_incomplete_stops_before_eof_and_delivers_metadata_before_strea
         super::super::TransportFailureKind::ProviderIncomplete { .. }
     ));
     assert!(error.request_failure().is_none());
-    let metadata = summary(rx.recv().await.unwrap());
+    let metadata = observation_rx.await.unwrap();
     assert!(
         rx.recv().await.is_none(),
         "exactly one summary, emitted before sender drop"
@@ -128,13 +122,14 @@ async fn eof_and_read_failure_keep_distinct_causes_and_never_dispatch_unfinished
         body.push_str("event: error\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"never-run\"}}\npartial-json");
         let (response, _, server) = response(body.into_bytes(), truncated, false).await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let error = read_response(response, Some(tx), TOKEN, ACCOUNT)
+        let (observation_tx, observation_rx) = tokio::sync::oneshot::channel();
+        let error = read_response(response, Some(tx), TOKEN, ACCOUNT, Some(observation_tx))
             .await
             .unwrap_err();
         assert!(
             matches!(error, TransportError::IncompleteResponse(cause) if cause == if truncated { StreamInterruption::ReadFailed } else { StreamInterruption::MissingCompletion })
         );
-        let metadata = summary(rx.recv().await.unwrap());
+        let metadata = observation_rx.await.unwrap();
         assert!(rx.recv().await.is_none());
         assert_eq!(
             metadata.end,
@@ -163,9 +158,10 @@ async fn eof_and_read_failure_keep_distinct_causes_and_never_dispatch_unfinished
 }
 
 #[tokio::test]
-async fn observer_closure_releases_full_summary_channel_without_replacing_terminal_error() {
+async fn observer_closure_does_not_replace_terminal_error_with_full_data_channel() {
     let (response, release, server) = response(incomplete(), false, true).await;
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let (observation_tx, observation_rx) = tokio::sync::oneshot::channel();
     tx.send(StreamEvent::Delta {
         tool_name: None,
         item_id: "prior".into(),
@@ -175,8 +171,15 @@ async fn observer_closure_releases_full_summary_channel_without_replacing_termin
     })
     .await
     .unwrap();
-    let reader = tokio::spawn(read_response(response, Some(tx), TOKEN, ACCOUNT));
-    // Closing observation during cleanup must release bounded backpressure.
+    let reader = tokio::spawn(read_response(
+        response,
+        Some(tx),
+        TOKEN,
+        ACCOUNT,
+        Some(observation_tx),
+    ));
+    drop(observation_rx);
+    // Neither diagnostic closure nor full output capacity blocks a terminal.
     rx.close();
     drop(rx);
     let error = tokio::time::timeout(Duration::from_secs(2), reader)
@@ -185,6 +188,93 @@ async fn observer_closure_releases_full_summary_channel_without_replacing_termin
         .unwrap()
         .unwrap_err();
     assert!(matches!(error, TransportError::ResponseIncomplete { .. }));
+    let _ = release.send(());
+    server.await.unwrap();
+}
+
+fn visible_then_terminal(completed: bool) -> Vec<u8> {
+    let mut wire = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"answer\",\"content_index\":0,\"delta\":\"λ\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"λ\"}]}}\n\n"
+    ).as_bytes().to_vec();
+    if completed {
+        wire.extend_from_slice(b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-capacity-one\",\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n");
+    }
+    wire
+}
+
+#[tokio::test]
+async fn capacity_one_data_stream_preserves_items_and_independent_observation() {
+    let (response, release, server) = response(visible_then_terminal(true), false, true).await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let (observation_tx, observation_rx) = tokio::sync::oneshot::channel();
+    let reader = tokio::spawn(read_response(
+        response,
+        Some(tx),
+        TOKEN,
+        ACCOUNT,
+        Some(observation_tx),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        assert!(matches!(rx.recv().await.unwrap(), StreamEvent::Delta { text, .. } if text == "λ"));
+        assert!(
+            matches!(rx.recv().await.unwrap(), StreamEvent::CompletedItem(done)
+            if done.item().0["id"] == "answer")
+        );
+        let turn = reader.await.unwrap().unwrap();
+        assert_eq!(turn.response_id, "resp-capacity-one");
+        assert_eq!(turn.items.len(), 1);
+        assert!(rx.recv().await.is_none());
+        let observed = observation_rx.await.unwrap();
+        assert_eq!(observed.terminal, Some(ResponseTerminal::Completed));
+        assert_eq!(observed.end, ResponseEnd::ProviderTerminal);
+        assert_eq!(observed.usage.unwrap().input_tokens, Some(3));
+        // Bare response readers cannot issue request/queue timing facts.
+        assert_eq!(observed.backend, None);
+        assert_eq!(observed.first_text_ms, None);
+    })
+    .await
+    .expect("capacity-one data channel must make progress with observation enabled");
+    let _ = release.send(());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn dropped_held_stream_retains_observed_partial_facts_without_completion() {
+    let (response, release, server) = response(visible_then_terminal(false), false, true).await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let (observation_tx, observation_rx) = tokio::sync::oneshot::channel();
+    let mut reader = Box::pin(read_response(
+        response,
+        Some(tx),
+        TOKEN,
+        ACCOUNT,
+        Some(observation_tx),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut items = 0;
+        while items < 2 {
+            tokio::select! {
+                result = &mut reader => panic!("held response unexpectedly settled: {result:?}"),
+                event = rx.recv() => { assert!(event.is_some()); items += 1; }
+            }
+        }
+        assert!(futures_util::poll!(&mut reader).is_pending());
+    })
+    .await
+    .unwrap();
+    drop(reader);
+    let observed = observation_rx.await.unwrap();
+    assert_eq!(observed.end, ResponseEnd::Abandoned);
+    assert_eq!(observed.terminal, None);
+    assert_eq!(
+        observed.last_recognized_event,
+        Some(EventKind::OutputItemDone)
+    );
+    assert!(observed.received_bytes.unwrap() > 0);
+    assert_eq!(observed.framed_events, Some(2));
+    assert_eq!(observed.usage, None);
+    assert!(rx.recv().await.is_none());
     let _ = release.send(());
     server.await.unwrap();
 }
@@ -243,15 +333,16 @@ async fn http_terminal_precedes_malformed_tail_without_waiting_for_body_close() 
         let (response, release, server) =
             response(terminal_wire(completed, "\r\n"), false, true).await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (observation_tx, observation_rx) = tokio::sync::oneshot::channel();
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            read_response(response, Some(tx), TOKEN, ACCOUNT),
+            read_response(response, Some(tx), TOKEN, ACCOUNT, Some(observation_tx)),
         )
         .await
         .unwrap();
         if completed {
             assert_eq!(result.unwrap().response_id, "resp-λ");
-            let observation = summary(rx.recv().await.unwrap());
+            let observation = observation_rx.await.unwrap();
             assert_eq!(observation.terminal, Some(ResponseTerminal::Completed));
             assert_eq!(observation.end, ResponseEnd::ProviderTerminal);
             assert_eq!(observation.backend, None);
@@ -267,7 +358,7 @@ async fn http_terminal_precedes_malformed_tail_without_waiting_for_body_close() 
                 })
             ));
             assert_eq!(
-                summary(rx.recv().await.unwrap()).end,
+                observation_rx.await.unwrap().end,
                 ResponseEnd::ProviderTerminal
             );
             assert!(rx.recv().await.is_none());

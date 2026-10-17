@@ -529,13 +529,16 @@ impl ResponsesTransport for MetadataThenFailure {
     }
     async fn create_streaming(
         &self,
-        _: PreparedProviderRequest,
-        sink: tokio::sync::mpsc::Sender<StreamEvent>,
+        mut request: PreparedProviderRequest,
+        _sink: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let summary=serde_json::from_value(json!({"version":1,"body_elapsed_ms":0,"event_kind_tail":[],"sse_event_kind_tail":[],"unknown_event_count":0,"unframed_line_bytes":0,"unframed_data_bytes":0,"unframed_event_name":false,"metadata_truncated":false,"end":"provider_terminal"})).unwrap();
-        sink.send(StreamEvent::Observation(summary)).await.unwrap();
-        // Let the observer receive metadata before the native failure. A failing
-        // diagnostic write must not replace the imminent provider outcome.
+        request
+            .take_observation_publisher()
+            .unwrap()
+            .send(summary)
+            .unwrap();
+        // A failing diagnostic write must not replace the provider outcome.
         tokio::task::yield_now().await;
         Err(TransportError::ResponseIncomplete {
             response_id: "primary-incomplete".into(),

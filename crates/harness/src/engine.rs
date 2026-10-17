@@ -1917,7 +1917,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             let store = self.store.clone();
             let seal_head = parent.clone();
-            let (req, provider_request) = match blocking(move || {
+            let (mut req, provider_request) = match blocking(move || {
                 let instructions = store.intern_replay_instructions(&req.instructions)?;
                 let prepared = store
                     .prepare_provider_request(
@@ -1969,6 +1969,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     update: ModelOutputUpdate::Started,
                 });
             }
+            let mut transport_observation = req
+                .take_transport_observation()
+                .expect("fresh prepared request receipt");
             let mut create = Box::pin(self.client.create_streaming(req, event_tx));
             let mut turn_call_ids = Vec::<CallId>::new();
             let mut turn_call_items = Vec::<(CallId, Item)>::new();
@@ -1982,7 +1985,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let mut persisted_items = Vec::<Item>::new();
             let mut event_stream_open = true;
             let mut deferred_dispatch_error = None;
-            let mut transport_observation = None;
             let turn = loop {
                 tokio::select! {
                     settlement = settlements.recv(), if settlements_open => {
@@ -1999,11 +2001,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         Ok(turn) => break turn,
                         Err(error) => {
                             output_lifetime.stop();
-                            // Drop the actual producer before draining its reserved
-                            // final observation; dropping a Pin<&mut _> is insufficient.
+                            // Drop the actual producer before reading its diagnostic
+                            // receipt; dropping a Pin<&mut _> is insufficient.
                             drop(create);
                             let retained_tail = self.retain_provider_tail(&provider_request, &parent, &mut event_rx).await;
-                            let retained_observation = match transport_observation.take() { Some(summary) => self.retain_transport_observation(&parent, summary).await, None => Ok(()) };
+                            let retained_observation = self.retain_transport_receipt(&parent, &mut transport_observation).await;
                             let state = if matches!(error, TransportError::IncompleteResponse(_)) { crate::store::ProviderResponseState::Interrupted } else if error.request_failure().is_some() { crate::store::ProviderResponseState::Rejected } else { crate::store::ProviderResponseState::Failed };
                             let store = self.store.clone();
                             let stopped_request = parent.clone();
@@ -2034,7 +2036,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             output_lifetime.stop();
                             drop(create);
                             let retained_tail = self.retain_provider_tail(&provider_request, &parent, &mut event_rx).await;
-                            let retained_observation = match transport_observation.take() { Some(summary) => self.retain_transport_observation(&parent, summary).await, None => Ok(()) };
+                            let retained_observation = self.retain_transport_receipt(&parent, &mut transport_observation).await;
                             let store = self.store.clone();
                             let stopped = parent.clone();
                             let stopped = blocking(move || store.stop_provider_response(&stopped, crate::store::ProviderResponseState::Interrupted)).await;
@@ -2115,7 +2117,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                     Err(error) => deferred_dispatch_error = Some(error),
                                 }
                             }
-                            Some(StreamEvent::Observation(summary)) => { transport_observation = Some(summary); }
                             Some(StreamEvent::Delta {item_id, channel, index, text, tool_name}) => {
                                 self.observe_delta(&parent, item_id, channel, index, text, tool_name);
                             }
@@ -2124,6 +2125,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     }
                 }
             };
+            drop(create);
             // Once transport completed, its exact request/response pair is
             // durable even if a subsequent dispatch or output step fails.
             let (turn, replay_event) = {
@@ -2139,16 +2141,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     Err(error) => return Err(error),
                 }
             };
-            if let Some(observation) = transport_observation.take() {
-                self.retain_transport_observation(&parent, observation)
-                    .await?;
-            }
+            self.retain_transport_receipt(&parent, &mut transport_observation)
+                .await?;
             // A completed response can race the buffered final item events.
             while let Ok(event) = event_rx.try_recv() {
-                if let StreamEvent::Observation(summary) = event {
-                    self.retain_transport_observation(&parent, summary).await?;
-                    continue;
-                }
                 if let StreamEvent::Delta {
                     item_id,
                     channel,
@@ -4330,9 +4326,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let mut failure = None;
         while let Ok(event) = events.try_recv() {
             let result = match event {
-                StreamEvent::Observation(summary) => {
-                    self.retain_transport_observation(request, summary).await
-                }
                 StreamEvent::CompletedItem(done) => {
                     async {
                         let (item, inserted) = self.retain_provider_item(issued, done).await?;
@@ -4374,6 +4367,26 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
         }
         failure.map_or(Ok(()), Err)
+    }
+
+    /// Read only after the producer has completed or been dropped. Component
+    /// transports may publish no receipt; closure is not evidence of success.
+    async fn retain_transport_receipt(
+        &self,
+        request: &RequestId,
+        receipt: &mut tokio::sync::oneshot::Receiver<crate::transport::TransportObservation>,
+    ) -> Result<(), EngineError> {
+        match receipt.try_recv() {
+            Ok(observation) => {
+                self.retain_transport_observation(request, observation)
+                    .await
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Ok(()),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => Err(TransportError::Stream(
+                "transport observation producer did not settle".into(),
+            )
+            .into()),
+        }
     }
 
     async fn retain_transport_observation(
@@ -4810,16 +4823,18 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     /// Compaction requests retain streamed facts but never dispatch provider effects.
     async fn execute_compaction_submission(
         &self,
-        prepared: PreparedProviderRequest,
+        mut prepared: PreparedProviderRequest,
         mut cancellation: watch::Receiver<bool>,
         cancellation_head: &RequestId,
     ) -> Result<ResponsesTurn, EngineError> {
         let issued = prepared.issuer().clone();
         let request = prepared.request_id().clone();
         let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let mut transport_observation = prepared
+            .take_transport_observation()
+            .expect("fresh prepared request receipt");
         let mut create = Box::pin(self.client.create_streaming(prepared, tx));
         let mut stream_open = true;
-        let mut transport_observation = None;
         let result = loop {
             if *cancellation.borrow() || cancellation.has_changed().is_err() {
                 break Err(EngineError::Cancelled {
@@ -4839,7 +4854,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             break Err(error);
                         }
                     }
-                    Some(StreamEvent::Observation(summary)) => transport_observation = Some(summary),
                     Some(StreamEvent::Delta { .. }) => {}
                     None => stream_open = false,
                 }
@@ -4847,10 +4861,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         };
         drop(create);
         let retained_tail = self.retain_provider_tail(&issued, &request, &mut rx).await;
-        let retained_observation = match transport_observation {
-            Some(summary) => self.retain_transport_observation(&request, summary).await,
-            None => Ok(()),
-        };
+        let retained_observation = self
+            .retain_transport_receipt(&request, &mut transport_observation)
+            .await;
         match result {
             Ok(turn) => {
                 let store = self.store.clone();
