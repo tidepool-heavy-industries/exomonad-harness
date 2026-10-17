@@ -324,7 +324,7 @@ async fn pending_custom_call_survives_handoff_and_receives_late_output() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let call = Item(
-        json!({"type":"custom_tool_call","call_id":"custom-1","name":"custom","input":"echo raw","opaque":"exact"}),
+        json!({"type":"custom_tool_call","call_id":"custom-1","name":"custom","input":"echo raw","async":true,"opaque":"exact"}),
     );
     let mut provisional = turn("provisional", vec![final_answer()]).unwrap();
     provisional.usage.input_tokens = Some(0);
@@ -356,7 +356,7 @@ async fn pending_custom_call_survives_handoff_and_receives_late_output() {
     )
     .with_plain_text_compaction(NonZeroU64::new(800).unwrap());
     let release_requests = requests.clone();
-    tokio::spawn(async move {
+    let release = async move {
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             loop {
                 if release_requests.lock().unwrap().len() >= 3 {
@@ -366,12 +366,20 @@ async fn pending_custom_call_survives_handoff_and_receives_late_output() {
             }
         })
         .await
-        .expect("successor request with pending custom call");
-        release_tx.send(()).unwrap();
-    });
+        .map_err(|error| format!("successor request with pending custom call: {error}"))?;
+        release_tx
+            .send(())
+            .map_err(|_| "custom call stopped before release".to_owned())
+    };
     let (_tx, rx) = watch::channel(false);
     let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::unbounded_channel();
-    let completion = engine.run(None, input(), rx, inbox_rx).await.unwrap();
+    let run = async {
+        engine
+            .run(None, input(), rx, inbox_rx)
+            .await
+            .map_err(|error| format!("pending custom run: {error:?}"))
+    };
+    let (completion, ()) = tokio::try_join!(run, release).unwrap();
     let sent = requests.lock().unwrap();
     assert!(sent[2].input.contains(&call));
     assert!(completion.transcript.contains(&call));
