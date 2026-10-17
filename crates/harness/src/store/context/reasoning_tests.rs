@@ -187,6 +187,15 @@ fn reasoning_is_readable_but_not_editable_for_other_routes_or_unknown_continuity
             Some(("encrypted_content", json!("secret"))),
         ),
         (ResponsesRoute::DeepSeek, Some(("future", json!(true)))),
+        (
+            ResponsesRoute::DeepSeek,
+            Some(("status", json!("incomplete"))),
+        ),
+        (
+            ResponsesRoute::DeepSeek,
+            Some(("status", json!("in_progress"))),
+        ),
+        (ResponsesRoute::DeepSeek, Some(("id", json!(42)))),
         (ResponsesRoute::DeepSeek, Some(("summary", json!(null)))),
         (
             ResponsesRoute::DeepSeek,

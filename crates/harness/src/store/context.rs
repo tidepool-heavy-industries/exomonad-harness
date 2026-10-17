@@ -774,17 +774,18 @@ fn message(item: &Item) -> Option<(ContextRole, String)> {
     Some((role, text))
 }
 
-fn opaque(item: &Item) -> bool {
-    fn encrypted(value: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Object(m) => m
-                .iter()
-                .any(|(k, v)| k.starts_with("encrypted") || encrypted(v)),
-            serde_json::Value::Array(a) => a.iter().any(encrypted),
-            _ => false,
-        }
+fn encrypted_payload(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| key.starts_with("encrypted") || encrypted_payload(value)),
+        serde_json::Value::Array(items) => items.iter().any(encrypted_payload),
+        _ => false,
     }
-    encrypted(&item.0)
+}
+
+fn opaque(item: &Item) -> bool {
+    encrypted_payload(&item.0)
         || !matches!(
             item.0["type"].as_str(),
             Some(
@@ -932,6 +933,7 @@ fn reasoning_editable_origins(
                         return false;
                     };
                     *index < cut
+                        && !encrypted_payload(&all[*index].item.0)
                         && (all[*index].item.0["type"] != "reasoning"
                             || plaintext_reasoning(&all[*index].item))
                 })
@@ -950,8 +952,12 @@ fn plaintext_reasoning(item: &Item) -> bool {
             "type" | "id" | "status" | "content" | "summary"
         )
     }) && fields
-        .get("summary")
-        .is_none_or(|summary| summary.as_array().is_some_and(Vec::is_empty))
+        .get("status")
+        .is_none_or(|status| status == "completed")
+        && fields.get("id").is_none_or(serde_json::Value::is_string)
+        && fields
+            .get("summary")
+            .is_none_or(|summary| summary.as_array().is_some_and(Vec::is_empty))
         && item.0["content"].as_array().is_some_and(|parts| {
             !parts.is_empty()
                 && parts.iter().all(|part| {
