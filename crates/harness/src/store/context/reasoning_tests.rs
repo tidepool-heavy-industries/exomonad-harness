@@ -471,7 +471,10 @@ fn effective_selection_uses_pending_embedded_frontier_before_and_after_settlemen
     use crate::store::embedded_round::EmbeddedRoundOutcome;
     struct Initial(HostIdentity);
     impl BindingInitialAuthority for Initial {
-        fn validate_initial(&self, identity: &HostIdentity) -> std::result::Result<bool, String> {
+        fn validate_initial_binding(
+            &self,
+            identity: &HostIdentity,
+        ) -> std::result::Result<bool, String> {
             Ok(identity == &self.0)
         }
     }
