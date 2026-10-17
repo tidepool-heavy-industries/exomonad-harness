@@ -943,9 +943,14 @@ fn plaintext_reasoning(item: &Item) -> bool {
     let Some(fields) = item.0.as_object() else {
         return false;
     };
-    fields
-        .keys()
-        .all(|key| matches!(key.as_str(), "type" | "id" | "status" | "content"))
+    fields.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "type" | "id" | "status" | "content" | "summary"
+        )
+    }) && fields
+        .get("summary")
+        .is_none_or(|summary| summary.as_array().is_some_and(Vec::is_empty))
         && item.0["content"].as_array().is_some_and(|parts| {
             !parts.is_empty()
                 && parts.iter().all(|part| {

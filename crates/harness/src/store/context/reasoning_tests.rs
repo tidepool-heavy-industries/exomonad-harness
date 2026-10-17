@@ -126,7 +126,7 @@ fn rewrite(
 fn reasoning_rewrite_preserves_original_and_projects_only_selected_part() {
     let store = Store::memory().unwrap();
     let original = Item(
-        json!({"type":"reasoning","id":"r","status":"completed","content":[{"type":"reasoning_text","text":"first λ"},{"type":"reasoning_text","text":"second"}]}),
+        json!({"type":"reasoning","id":"r","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"first λ"},{"type":"reasoning_text","text":"second"}]}),
     );
     let (snapshot, original) = fixture(&store, original, ResponsesRoute::DeepSeek);
     let fields = fields(&snapshot);
