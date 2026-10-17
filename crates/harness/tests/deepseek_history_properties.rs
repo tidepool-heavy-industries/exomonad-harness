@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use harness::{
     context::{
         ContextBlock, ContextChange, ContextNativeKind, ContextPatch, ContextProblemCode,
-        ContextTextSelector, ContextTransaction, ContextTransactionDraft, ContextTransactionStatus,
+        ContextReference, ContextTextSelector, ContextTransaction, ContextTransactionDraft,
+        ContextTransactionStatus, RetainedExchangeObservation, RetainedExchangeReference,
     },
     embedding::{
         AdmissionGuard, Conversation, EmbeddedError, EmbeddedToolManifest, HostActor, HostControl,
@@ -16,12 +17,12 @@ use harness::{
     },
     engine::{EmbeddedRoundReadiness, EngineConfig, RoundCleanup, RoundExecution},
     item::{Item, ToolInput},
-    model::{AgentPath, Effort, OperationId, RequestId},
+    model::{AgentPath, CallId, Effort, OperationId, RequestId},
     provider::{
         CallContext, ContextDisposition, Provider, ProviderCompletion, ProviderError,
         ToolScheduling,
     },
-    store::Store,
+    store::{Store, TerminalOutcome},
     transport::{
         CredentialReference, InferenceLimits, NativeTransportAdmission, NativeTransportContract,
         ResponsesClient, ResponsesProtocol, ResponsesRoute, auth::DeepSeekAuth,
@@ -270,6 +271,59 @@ fn completed(id: &str, output: &[Value]) -> HttpReply {
     HttpReply::fragmented_sse(semantic_events(&events), &[1, 3, 2, 7])
 }
 
+enum ExpectedProjection<'a> {
+    Reasoning(&'a str),
+    Exchange {
+        present: bool,
+        call: &'a Value,
+        output: &'a Value,
+    },
+}
+
+impl ExpectedProjection<'_> {
+    fn assert_input(&self, body: &Value) {
+        let input = body["input"].as_array().unwrap();
+        match self {
+            Self::Reasoning(expected) => {
+                let actual = input
+                    .iter()
+                    .filter(|item| item["type"] == "reasoning")
+                    .collect::<Vec<_>>();
+                assert_eq!(actual.len(), 1);
+                let mut projected = reasoning();
+                projected["content"][0]["text"] = (*expected).into();
+                assert_eq!(
+                    *actual[0], projected,
+                    "only the authored part changes in actual HTTP input"
+                );
+            }
+            Self::Exchange {
+                present,
+                call,
+                output,
+            } => {
+                assert!(
+                    input.iter().all(|item| item["type"] != "reasoning"),
+                    "this fixture earns a reasoning-free exchange"
+                );
+                let actual = input
+                    .iter()
+                    .filter(|item| item["call_id"] == call["call_id"])
+                    .collect::<Vec<_>>();
+                let expected = if *present {
+                    vec![*call, *output]
+                } else {
+                    vec![]
+                };
+                assert_eq!(
+                    actual, expected,
+                    "actual HTTP must contain the exact source pair once or neither member"
+                );
+            }
+        }
+    }
+}
+
 async fn round(
     conversation: &Conversation,
     auth: DeepSeekAuth,
@@ -277,7 +331,7 @@ async fn round(
     server: &mut LocalResponses,
     label: &str,
     first_output: Vec<Value>,
-    expected_visible: Option<&str>,
+    expected_projection: Option<ExpectedProjection<'_>>,
 ) -> RequestId {
     conversation
         .input(label, "offline-human", label)
@@ -312,25 +366,12 @@ async fn round(
     };
     assert_eq!(first.captured.json()["model"], "deepseek-flash");
     first.respond(completed(&format!("{label}-first"), &first_output));
-    if let Some(expected) = expected_visible {
+    if let Some(expected) = expected_projection {
         let next = tokio::select! {
             result = &mut running => panic!("round ended before its post-transaction HTTP request: {result:?}"),
             request = server.next() => request,
         };
-        let body = next.captured.json();
-        let actual = body["input"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|item| item["type"] == "reasoning")
-            .collect::<Vec<_>>();
-        assert_eq!(actual.len(), 1);
-        let mut projected = reasoning();
-        projected["content"][0]["text"] = expected.into();
-        assert_eq!(
-            *actual[0], projected,
-            "only the authored part changes in actual HTTP input"
-        );
+        expected.assert_input(&next.captured.json());
         next.respond(completed(&format!("{label}-final"), &[assistant()]));
     }
     let settled = tokio::time::timeout(Duration::from_secs(5), running)
@@ -419,7 +460,7 @@ async fn http_reasoning_transactions_preserve_originals_across_edit_refusal_and_
             &mut server,
             &label,
             vec![call],
-            Some(expected),
+            Some(ExpectedProjection::Reasoning(expected)),
         )
         .await;
         let attempts = editor.attempts.lock().unwrap();
@@ -465,5 +506,300 @@ async fn http_reasoning_transactions_preserve_originals_across_edit_refusal_and_
         .map(|item| item.0)
         .collect::<Vec<_>>();
     assert_eq!(originals, vec![reasoning()]);
+    server.finish().await;
+}
+
+const SOURCE_CALL: &str = "retained-source-call";
+const SOURCE_VALUE: &str = "actual source effect λ 🪼";
+
+enum ExchangeEdit {
+    Remove,
+    AppendTwice,
+    Append,
+}
+
+struct RetainedSource {
+    group: ContextReference,
+    source: RetainedExchangeReference,
+}
+
+struct ExchangeEditor {
+    store: Arc<Store>,
+    actions: Mutex<VecDeque<ExchangeEdit>>,
+    source_effects: Mutex<Vec<OperationId>>,
+    retained: Mutex<Option<RetainedSource>>,
+    attempts: Mutex<Vec<(OperationId, ContextTransaction)>>,
+}
+
+#[async_trait]
+impl Provider for ExchangeEditor {
+    fn tools(&self) -> Vec<Value> {
+        vec![]
+    }
+
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        panic!("installed tools must receive their actual operation context");
+    }
+
+    async fn complete_call(
+        &self,
+        name: &str,
+        input: ToolInput,
+        context: CallContext,
+    ) -> ProviderCompletion {
+        assert_eq!(input, ToolInput::Function(json!({})));
+        if name == "source" {
+            let operation = context
+                .operation
+                .expect("source effect has a scheduler-issued operation");
+            assert_eq!(operation.call, CallId(SOURCE_CALL.into()));
+            self.source_effects.lock().unwrap().push(operation);
+            return ProviderCompletion::unedited(Ok(json!({"source_value":SOURCE_VALUE})));
+        }
+        assert_eq!(name, "edit");
+        let snapshot = context.context.expect("actual synchronous editor cut");
+        assert_eq!(context.operation.as_ref(), Some(&snapshot.operation));
+        let inspection = self.store.inspect_context(&snapshot).unwrap();
+        let mut authority = self.retained.lock().unwrap();
+        if authority.is_none() {
+            // At the first editor cut this fixture has issued exactly one source
+            // call and published its output. Later edits retain its opaque facts.
+            let groups = inspection
+                .document
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContextBlock::Native {
+                        reference,
+                        kind: ContextNativeKind::CompletedExchange,
+                        ..
+                    } => Some(reference),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                groups.len(),
+                1,
+                "earn the source premise before context history grows"
+            );
+            let RetainedExchangeObservation::Available(source) = self
+                .store
+                .observe_retained_exchange(&snapshot, groups[0])
+                .unwrap()
+            else {
+                panic!("actual successful source must already have an exact publication");
+            };
+            *authority = Some(RetainedSource {
+                group: groups[0].clone(),
+                source,
+            });
+        }
+        let authority = authority.as_ref().unwrap();
+        assert_eq!(
+            self.store
+                .observe_retained_exchange(&snapshot, &authority.group)
+                .unwrap(),
+            RetainedExchangeObservation::Available(authority.source.clone()),
+            "removed source stays authorized by exact pre-cut retained ancestry"
+        );
+        let action = self
+            .actions
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("one transaction action per editor");
+        let changes = match action {
+            ExchangeEdit::Remove => {
+                let version = inspection
+                    .unit_versions
+                    .iter()
+                    .find(|version| version.reference == authority.group)
+                    .expect("the exact active source unit has an issued removal version");
+                vec![ContextChange::RemoveContextUnit {
+                    reference: version.reference.clone(),
+                    expected: version.digest.clone(),
+                }]
+            }
+            ExchangeEdit::AppendTwice => vec![
+                ContextChange::AppendRetainedExchange {
+                    source: authority.source.clone()
+                };
+                2
+            ],
+            ExchangeEdit::Append => vec![ContextChange::AppendRetainedExchange {
+                source: authority.source.clone(),
+            }],
+        };
+        let patch = ContextPatch { changes };
+        let transaction = self.store.context_transaction(&snapshot, &patch).unwrap();
+        self.attempts
+            .lock()
+            .unwrap()
+            .push((snapshot.operation, transaction));
+        let mut completion = ProviderCompletion::unedited(Ok(json!({"editor":"completed"})));
+        completion.context = ContextDisposition::Transaction(ContextTransactionDraft {
+            patch,
+            next_model: None,
+            next_effort: None,
+        });
+        completion
+    }
+}
+
+#[tokio::test]
+async fn http_exchange_transactions_reinsert_exact_success_without_reexecution() {
+    let mut server = LocalResponses::start().await;
+    let files = Files::new();
+    let auth = files.auth(&server.endpoint);
+    let path = files.0.join("exchange.sqlite");
+    let store = Arc::new(Store::open(&path).unwrap());
+    let editor = Arc::new(ExchangeEditor {
+        store: store.clone(),
+        actions: Mutex::new(VecDeque::new()),
+        source_effects: Mutex::new(vec![]),
+        retained: Mutex::new(None),
+        attempts: Mutex::new(vec![]),
+    });
+    let tools = ["source", "edit"]
+        .map(|name| {
+            json!({"type":"function","name":name,"strict":true,
+        "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}})
+        })
+        .to_vec();
+    let manifest = EmbeddedToolManifest::with_scheduling(
+        tools,
+        HashMap::from([
+            ("source".into(), ToolScheduling::BeforeNextInference),
+            ("edit".into(), ToolScheduling::BeforeNextInference),
+        ]),
+    )
+    .unwrap();
+    let application = Arc::new(Application {
+        identity: HostIdentity {
+            run: "offline-exchange".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "live-application".into(),
+        },
+        surface: Arc::new(
+            ToolSurface::from_manifest("exchange-v1".into(), Arc::new(manifest), editor.clone())
+                .unwrap(),
+        ),
+    });
+    let conversation = Conversation::attach(store.clone(), application, None)
+        .await
+        .unwrap();
+    let scheduler = Arc::new(JobScheduler::new(1).unwrap());
+    let source_call = json!({"type":"function_call","id":"retained-source-item","call_id":SOURCE_CALL,"name":"source","arguments":"{}"});
+    let source_output = json!({"type":"function_call_output","call_id":SOURCE_CALL,"output":json!({"source_value":SOURCE_VALUE}).to_string()});
+    let original_head = round(
+        &conversation,
+        auth.clone(),
+        scheduler.clone(),
+        &mut server,
+        "source-round",
+        vec![source_call.clone()],
+        Some(ExpectedProjection::Exchange {
+            present: true,
+            call: &source_call,
+            output: &source_output,
+        }),
+    )
+    .await;
+    let source_operation = {
+        let effects = editor.source_effects.lock().unwrap();
+        assert_eq!(effects.len(), 1);
+        effects[0].clone()
+    };
+    let original_terminal = store
+        .replay_tool_output_operation(&source_operation)
+        .unwrap()
+        .expect("source has a genuine retained terminal");
+    assert_eq!(original_terminal.terminal, TerminalOutcome::Success);
+    assert_eq!(original_terminal.item.0, source_output);
+    let original_history = store.context_history(&original_head).unwrap();
+    let mut previous_head = original_head.clone();
+    for (index, (action, present)) in [
+        (ExchangeEdit::Remove, false),
+        (ExchangeEdit::AppendTwice, true),
+        (ExchangeEdit::Remove, false),
+        (ExchangeEdit::Append, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index == 3 {
+            // A separate Store open only reads durable evidence. It supplies no
+            // editing snapshot; the still-live application issues the next cut.
+            let reopened_reader = Store::open(&path).unwrap();
+            assert_eq!(
+                reopened_reader.context_history(&original_head).unwrap(),
+                original_history
+            );
+            assert_eq!(
+                reopened_reader
+                    .replay_tool_output_operation(&source_operation)
+                    .unwrap(),
+                Some(original_terminal.clone())
+            );
+            assert!(
+                reopened_reader
+                    .context_history(&previous_head)
+                    .unwrap()
+                    .iter()
+                    .all(|(_, _, item)| item.0["call_id"] != SOURCE_CALL)
+            );
+            drop(reopened_reader);
+        }
+        editor.actions.lock().unwrap().push_back(action);
+        let label = format!("exchange-edit-{index}");
+        let call = json!({"type":"function_call","id":format!("exchange-editor-item-{index}"),"call_id":label,"name":"edit","arguments":"{}"});
+        previous_head = round(
+            &conversation,
+            auth.clone(),
+            scheduler.clone(),
+            &mut server,
+            &label,
+            vec![call],
+            Some(ExpectedProjection::Exchange {
+                present,
+                call: &source_call,
+                output: &source_output,
+            }),
+        )
+        .await;
+        let attempts = editor.attempts.lock().unwrap();
+        assert_eq!(attempts.len(), index + 1);
+        let (operation, transaction) = attempts.last().unwrap();
+        let ContextTransactionStatus::Committed(receipt) = store
+            .context_transaction_status(&operation.origin, transaction)
+            .unwrap()
+        else {
+            panic!("genuine source action must commit, separately from tool completion");
+        };
+        assert!(receipt.changed);
+        assert_eq!(
+            *editor.source_effects.lock().unwrap(),
+            vec![source_operation.clone()],
+            "history changes cannot execute the source again"
+        );
+        assert_eq!(
+            store.context_history(&original_head).unwrap(),
+            original_history
+        );
+        assert_eq!(
+            store
+                .replay_tool_output_operation(&source_operation)
+                .unwrap(),
+            Some(original_terminal.clone())
+        );
+        let claims = store.claims(&CallId(SOURCE_CALL.into())).unwrap();
+        assert!(!claims.is_empty());
+        assert!(
+            claims
+                .iter()
+                .all(|claim| claim.operation == source_operation)
+        );
+    }
+    assert!(editor.actions.lock().unwrap().is_empty());
     server.finish().await;
 }
