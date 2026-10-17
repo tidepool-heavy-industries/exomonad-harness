@@ -240,7 +240,13 @@ mod tests {
         output: Option<JobOutput>,
         published: bool,
     ) -> (Store, ContextSnapshot, ContextReference, OperationId) {
-        let store = Store::memory().unwrap();
+        fixture_in(Store::memory().unwrap(), output, published)
+    }
+    fn fixture_in(
+        store: Store,
+        output: Option<JobOutput>,
+        published: bool,
+    ) -> (Store, ContextSnapshot, ContextReference, OperationId) {
         let original = RequestId("original".into());
         store
             .write_request(
@@ -442,5 +448,51 @@ mod tests {
             store.replay_tool_output_operation(&operation).unwrap(),
             before
         );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+        #[test]
+        fn projection_histories_preserve_source_and_active_membership(actions in proptest::collection::vec((0u8..3, proptest::bool::ANY), 1..7)) {
+            let path = std::env::temp_dir().join(format!("exchange-history-{}.sqlite", uuid::Uuid::new_v4()));
+            let (mut store, snapshot, reference, operation) = fixture_in(Store::open(&path).unwrap(), Some(success()), true);
+            let canonical = store.context_history(&RequestId("original".into())).unwrap().into_iter()
+                .filter(|(_,_,item)| item.0["call_id"] == "source").map(|(_,_,item)| item).collect::<Vec<_>>();
+            let source_terminal = store.replay_tool_output_operation(&operation).unwrap();
+            let RetainedExchangeObservation::Available(source) = store.observe_retained_exchange(&snapshot, &reference).unwrap() else { panic!("successful source") };
+            let mut head = commit(&store, &snapshot, vec![]).head;
+            let mut present = true;
+            for (index, (action, reopen)) in actions.iter().enumerate() {
+                if *reopen { drop(store); store = Store::open(&path).unwrap(); }
+                let snapshot = editor(&store, &head, &format!("history-editor-{index}"));
+                let observed = store.observe_retained_exchange(&snapshot, &reference).unwrap();
+                proptest::prop_assert_eq!(observed, RetainedExchangeObservation::Available(source.clone()));
+                let changes = if *action == 0 {
+                    let changes = if present {
+                        let group = snapshot.blocks.iter().find(|block| block.items.iter().any(|item| item.output_operation.as_ref() == Some(&operation))).unwrap();
+                        let ContextBlock::Native {reference, ..} = &group.block else { panic!("source unit") };
+                        let inspection = crate::context::inspect_context(&snapshot.document);
+                        let version = inspection.unit_versions.iter().find(|version| &version.reference == reference).unwrap();
+                        vec![ContextChange::RemoveContextUnit { reference: reference.clone(), expected: version.digest.clone() }]
+                    } else { vec![] };
+                    present = false;
+                    changes
+                } else {
+                    present = true;
+                    vec![ContextChange::AppendRetainedExchange { source: source.clone() }; *action as usize]
+                };
+                head = commit(&store, &snapshot, changes).head;
+                let actual = store.context_request_state(&head, &snapshot.operation.origin).unwrap().history.into_iter()
+                    .filter(|(_,_,item)| item.0["call_id"] == "source").map(|(_,_,item)| item).collect::<Vec<_>>();
+                let expected = if present { canonical.clone() } else { vec![] };
+                proptest::prop_assert_eq!(actual, expected);
+                proptest::prop_assert_eq!(store.replay_tool_output_operation(&operation).unwrap(), source_terminal.clone());
+                let current_canonical = store.context_history(&RequestId("original".into())).unwrap().into_iter()
+                    .filter(|(_,_,item)| item.0["call_id"] == "source").map(|(_,_,item)| item).collect::<Vec<_>>();
+                proptest::prop_assert_eq!(&current_canonical, &canonical);
+            }
+            drop(store);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 }
