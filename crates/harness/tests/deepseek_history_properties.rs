@@ -369,7 +369,7 @@ async fn http_reasoning_transactions_preserve_originals_across_edit_refusal_and_
     let application = Arc::new(Application {
         identity: HostIdentity {
             run: "offline-context".into(),
-            actor: AgentPath("/context".into()),
+            actor: AgentPath("/root".into()),
             incarnation: "live-application".into(),
         },
         surface: Arc::new(
