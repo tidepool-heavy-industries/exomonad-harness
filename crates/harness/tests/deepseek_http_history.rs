@@ -448,3 +448,180 @@ async fn completed_terminal_releases_client_before_http_eof() {
     drop(chunks);
     server.finish().await;
 }
+
+fn retained_observation(
+    store: &Store,
+    request: &harness::model::RequestId,
+) -> harness::transport::TransportObservation {
+    let events = store
+        .events(Some(request))
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "responses_transport")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events.len(),
+        1,
+        "one transport owner observation for the actual issued request"
+    );
+    let payload: Value = serde_json::from_str(&events[0].payload).unwrap();
+    let retained = json!({"request_id":request.0,"observation":payload});
+    let serialized = serde_json::to_string(&retained).unwrap();
+    assert!(
+        serialized.len() <= 16 * 1024,
+        "synthetic metadata artifact must remain bounded"
+    );
+    assert!(!serialized.contains(SYNTHETIC_KEY));
+    // Actual Store metadata is an artifact for the offline report consumer.
+    // No request body, message content or key file is included.
+    println!("DEEPSEEK_OFFLINE_TRANSPORT_OBSERVATION {serialized}");
+    serde_json::from_value(payload).unwrap()
+}
+
+#[tokio::test]
+async fn native_http_observation_distinguishes_requested_returned_and_raw_usage() {
+    use harness::transport::{RawUsage, ResponseEnd, ResponseTerminal};
+    let mut server = LocalResponses::start().await;
+    let files = Files::new();
+    let store = Arc::new(Store::memory().unwrap());
+    let mut invocation = no_tools(
+        files.auth(&server.endpoint),
+        store.clone(),
+        "retain metadata separately",
+    );
+    let request = next_http(&mut server, &mut invocation).await;
+    assert_deepseek_request(&request.captured);
+    let raw_usage = json!({"input_tokens":13,"output_tokens":7,"total_tokens":20,
+        "input_tokens_details":{"cached_tokens":0},
+        "output_tokens_details":{"reasoning_tokens":null},
+        "offline_unknown_counter":{"preserved":77}});
+    let item = assistant("observed");
+    let events = vec![
+        json!({"type":"response.created","sequence_number":0,"response":{"id":"observation-success","status":"in_progress"}}),
+        json!({"type":"response.output_text.delta","sequence_number":1,"item_id":"message-1","output_index":0,"content_index":0,"delta":"observed"}),
+        json!({"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":item}),
+        json!({"type":"response.completed","sequence_number":3,"response":{
+            "id":"observation-success","status":"completed","output":[item],
+            "model":"deepseek-flash-offline-reported","reasoning":{"effort":"low"},
+            "max_output_tokens":17,"usage":raw_usage}}),
+    ];
+    request.respond(HttpReply::fragmented_sse(
+        semantic_events(&events),
+        &[1, 4, 2],
+    ));
+    let receipt = finished(&mut invocation).await;
+    assert!(
+        matches!(&receipt.outcome, Outcome::Text(text) if text == "observed"),
+        "{:?}",
+        receipt.outcome
+    );
+    let issued = &receipt.requests[0];
+    assert_eq!(
+        store.provider_response_state(issued).unwrap(),
+        Some(harness::store::ProviderResponseState::Completed)
+    );
+    let observation = retained_observation(&store, issued);
+    assert_eq!(observation.version, 3);
+    assert_eq!(
+        observation.requested_model.as_deref(),
+        Some("deepseek-flash")
+    );
+    assert_eq!(observation.backend, Some(ResponsesRoute::DeepSeek));
+    assert_eq!(observation.effective_reasoning, Some(Effort::High));
+    assert_eq!(observation.max_output_tokens, Some(65_536));
+    assert_eq!(
+        observation.returned_model.as_deref(),
+        Some("deepseek-flash-offline-reported")
+    );
+    assert_eq!(
+        observation.returned_reasoning_effort.as_deref(),
+        Some("low")
+    );
+    assert_eq!(observation.reported_max_output_tokens, Some(17));
+    assert_eq!(observation.http_status, Some(200));
+    assert_eq!(observation.dispatch_attempted, Some(true));
+    assert_eq!(observation.terminal, Some(ResponseTerminal::Completed));
+    assert_eq!(observation.end, ResponseEnd::ProviderTerminal);
+    assert!(observation.started_at_unix_ms.is_some());
+    assert!(observation.completed_at_unix_ms.is_some());
+    assert!(observation.first_event_ms.is_some());
+    assert!(observation.first_text_ms.is_some());
+    assert!(observation.first_reasoning_ms.is_none());
+    let usage = observation.usage.expect("provider returned usage metadata");
+    assert_eq!(usage.input_tokens, Some(13));
+    assert_eq!(usage.output_tokens, Some(7));
+    assert_eq!(usage.cached_tokens, Some(0));
+    assert_eq!(usage.cache_miss_tokens, None);
+    assert_eq!(usage.cache_write_tokens, None);
+    assert_eq!(usage.reasoning_tokens, None);
+    assert_eq!(usage.raw, RawUsage::Observed(raw_usage));
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn failed_http_observation_keeps_null_and_missing_usage_distinct_from_success() {
+    use harness::transport::{RawUsage, ResponseEnd, ResponseTerminal};
+    for explicit_null in [false, true] {
+        let mut server = LocalResponses::start().await;
+        let files = Files::new();
+        let store = Arc::new(Store::memory().unwrap());
+        let mut invocation = no_tools(
+            files.auth(&server.endpoint),
+            store.clone(),
+            "failed metadata is not completion",
+        );
+        let request = next_http(&mut server, &mut invocation).await;
+        assert_deepseek_request(&request.captured);
+        let mut response = json!({"id":"observation-failed","status":"failed",
+            "error":{"code":"offline_failed","message":"synthetic terminal failure"}});
+        if explicit_null {
+            response["usage"] = Value::Null;
+        }
+        request.respond(HttpReply::fragmented_sse(semantic_events(&[
+            json!({"type":"response.created","sequence_number":0,"response":{"id":"observation-failed","status":"in_progress"}}),
+            json!({"type":"response.failed","sequence_number":1,"response":response}),
+        ]), &[3, 1, 4]));
+        let receipt = finished(&mut invocation).await;
+        assert!(
+            matches!(receipt.outcome, Outcome::Failed(_)),
+            "{:?}",
+            receipt.outcome
+        );
+        let issued = &receipt.requests[0];
+        assert_eq!(
+            store.provider_response_state(issued).unwrap(),
+            Some(harness::store::ProviderResponseState::Failed)
+        );
+        assert!(
+            store
+                .items(issued)
+                .unwrap()
+                .iter()
+                .all(|item| item.0["role"] != "assistant")
+        );
+        let observation = retained_observation(&store, issued);
+        assert_eq!(
+            observation.requested_model.as_deref(),
+            Some("deepseek-flash")
+        );
+        assert_eq!(observation.returned_model, None);
+        assert_eq!(observation.terminal, Some(ResponseTerminal::ResponseFailed));
+        assert_eq!(observation.end, ResponseEnd::ProviderTerminal);
+        let usage = observation
+            .usage
+            .expect("terminal observation records whether usage was supplied");
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.cached_tokens, None);
+        assert_eq!(usage.reasoning_tokens, None);
+        assert_eq!(
+            usage.raw,
+            if explicit_null {
+                RawUsage::Observed(Value::Null)
+            } else {
+                RawUsage::Unavailable
+            }
+        );
+        server.finish().await;
+    }
+}
