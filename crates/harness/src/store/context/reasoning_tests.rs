@@ -685,14 +685,9 @@ fn effective_selection_reads_current_owner_head_and_final_positional_pin() {
     );
     let old = RequestId("old-selection".into());
     store
-        .write_request(
-            &old,
-            None,
-            "/root",
-            &[Item::configuration_update(Effort::Low)],
-            Usage::default(),
-        )
+        .write_request(&old, None, "/root", &[], Usage::default())
         .unwrap();
+    store.set_effort(&old, Effort::Low).unwrap();
     store.advance_agent_head(&actor, None, Some(&old)).unwrap();
     store
         .initialize_context_target(
@@ -711,14 +706,15 @@ fn effective_selection_reads_current_owner_head_and_final_positional_pin() {
             &current,
             Some(&old),
             "/root",
-            &[
-                Item::user_text("unrelated"),
-                Item::configuration_update(Effort::High),
-                Item::configuration_update(Effort::Max),
-            ],
+            &[Item::user_text("unrelated")],
             Usage::default(),
         )
         .unwrap();
+    store.set_effort(&current, Effort::High).unwrap();
+    store
+        .append_items(&current, &[Item::user_text("between settings")])
+        .unwrap();
+    store.set_effort(&current, Effort::Max).unwrap();
     store
         .advance_agent_head(&actor, Some(&old), Some(&current))
         .unwrap();
@@ -779,14 +775,9 @@ fn effective_selection_uses_pending_embedded_frontier_before_and_after_settlemen
             let old = RequestId("settled-selection".into());
             if with_settled {
                 store
-                    .write_embedded_request(
-                        &host,
-                        &old,
-                        None,
-                        &[Item::configuration_update(Effort::Low)],
-                        Usage::default(),
-                    )
+                    .write_embedded_request(&host, &old, None, &[], Usage::default())
                     .unwrap();
+                store.set_effort(&old, Effort::Low).unwrap();
                 assert!(
                     store
                         .settle_embedded_round(&host, None, &old, EmbeddedRoundOutcome::Completed)
@@ -798,13 +789,15 @@ fn effective_selection_uses_pending_embedded_frontier_before_and_after_settlemen
                     &host,
                     &pending,
                     with_settled.then_some(&old),
-                    &[
-                        Item::configuration_update(Effort::High),
-                        Item::configuration_update(Effort::Max),
-                    ],
+                    &[],
                     Usage::default(),
                 )
                 .unwrap();
+            store.set_effort(&pending, Effort::High).unwrap();
+            store
+                .append_items(&pending, &[Item::user_text("between settings")])
+                .unwrap();
+            store.set_effort(&pending, Effort::Max).unwrap();
             assert_eq!(
                 store.embedded_agent_head(&host).unwrap(),
                 with_settled.then_some(old)
