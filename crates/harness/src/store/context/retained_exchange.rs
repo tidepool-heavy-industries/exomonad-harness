@@ -338,6 +338,19 @@ mod tests {
                 RetainedExchangeObservation::CancelledWithReceipt,
             ),
         ];
+        let mut cases = cases.to_vec();
+        cases.push((
+            Some(JobOutput::Interrupted),
+            false,
+            RetainedExchangeObservation::Interrupted,
+        ));
+        cases.push((
+            Some(JobOutput::CancellationUnconfirmed(
+                crate::provider::ToolFailure::from("uncertain"),
+            )),
+            false,
+            RetainedExchangeObservation::CancellationUnconfirmed,
+        ));
         for (output, publish, expected) in cases {
             let (store, snapshot, reference, _) = fixture(output, publish);
             assert_eq!(
@@ -345,6 +358,31 @@ mod tests {
                     .observe_retained_exchange(&snapshot, &reference)
                     .unwrap(),
                 expected
+            );
+        }
+    }
+    #[test]
+    fn interrupted_and_unstarted_claims_do_not_become_pending_observations() {
+        for not_started in [false, true] {
+            let (store, snapshot, reference, operation) = fixture(None, false);
+            if not_started {
+                store
+                    .interrupt_unstarted_operation_claim(&operation, &operation.request)
+                    .unwrap();
+            } else {
+                store
+                    .interrupt_operation_claim(&operation, &operation.request)
+                    .unwrap();
+            }
+            assert_eq!(
+                store
+                    .observe_retained_exchange(&snapshot, &reference)
+                    .unwrap(),
+                if not_started {
+                    RetainedExchangeObservation::NotStarted
+                } else {
+                    RetainedExchangeObservation::Interrupted
+                }
             );
         }
     }

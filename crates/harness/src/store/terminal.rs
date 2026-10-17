@@ -186,13 +186,16 @@ pub(super) fn observed_outcome(
     if let Some((_, outcome, _)) = exact_terminal(c, operation)? {
         return Ok(Some(outcome));
     }
-    let raw: Option<String> = c.query_row(
+    let raw: Option<Option<String>> = c.query_row(
         "SELECT terminal_json FROM claims WHERE origin=?1 AND origin_request_id=?2 AND call_id=?3 AND request_id=?2 AND state='interrupted'",
         params![serde_json::to_string(&operation.origin)?, operation.request.0, operation.call.0],
         |row| row.get(0),
-    ).optional()?.flatten();
-    raw.map(|raw| decode_terminal(&raw).map(|(outcome, _)| outcome))
-        .transpose()
+    ).optional()?;
+    match raw {
+        None => Ok(None),
+        Some(None) => Ok(Some(TerminalOutcome::Interrupted)),
+        Some(Some(raw)) => decode_terminal(&raw).map(|(outcome, _)| Some(outcome)),
+    }
 }
 
 fn exact_claim_state(
