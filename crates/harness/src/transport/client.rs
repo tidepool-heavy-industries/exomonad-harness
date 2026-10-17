@@ -25,27 +25,34 @@ pub(crate) fn normalize_for_dispatch(
     request: &ResponsesRequest,
     contract: (ResponsesRoute, ResponsesProtocol),
 ) -> Result<NormalizedProviderBody, TransportError> {
-    let body = match contract.0 {
-        ResponsesRoute::ChatGptPlan => serde_json::to_value(normalized_request(request)?)
-            .map_err(|_| TransportError::InvalidAdmission)?,
-        ResponsesRoute::DeepSeek => {
-            deepseek_request(request, super::InferenceLimits::deepseek_default())?
-        }
-    };
-    let bytes = serde_json::to_vec(&body)
-        .map_err(|_| TransportError::Stream("request serialization failed".into()))?;
+    let bytes = match contract.0 {
+        // Keep the existing struct serializer and field order byte-for-byte.
+        ResponsesRoute::ChatGptPlan => serde_json::to_vec(&normalized_request(request)?),
+        ResponsesRoute::DeepSeek => serde_json::to_vec(&deepseek_request(
+            request,
+            super::InferenceLimits::deepseek_default(),
+            &vec![false; request.input.len()],
+        )?),
+    }
+    .map_err(|_| TransportError::Stream("request serialization failed".into()))?;
     Ok(NormalizedProviderBody(bytes))
 }
 
 pub(crate) fn normalize_for_selection(
     request: &ResponsesRequest,
     selection: &super::PreparedTransportSelection,
+    authored: &[bool],
 ) -> Result<NormalizedProviderBody, TransportError> {
     if let Some(admission) = selection.native_admission() {
         let contract = admission.contract();
         contract.validate()?;
+        if contract.route == ResponsesRoute::ChatGptPlan
+            && contract.limits.max_output_tokens.is_none()
+        {
+            return normalize_for_dispatch(request, selection.response_contract());
+        }
         let mut body = match contract.route {
-            ResponsesRoute::DeepSeek => deepseek_request(request, contract.limits)?,
+            ResponsesRoute::DeepSeek => deepseek_request(request, contract.limits, authored)?,
             ResponsesRoute::ChatGptPlan => serde_json::to_value(normalized_request(request)?)
                 .map_err(|_| TransportError::InvalidAdmission)?,
         };
@@ -55,6 +62,15 @@ pub(crate) fn normalize_for_selection(
         return serde_json::to_vec(&body)
             .map(NormalizedProviderBody)
             .map_err(|_| TransportError::InvalidAdmission);
+    }
+    if selection.response_contract().0 == ResponsesRoute::DeepSeek {
+        return serde_json::to_vec(&deepseek_request(
+            request,
+            super::InferenceLimits::deepseek_default(),
+            authored,
+        )?)
+        .map(NormalizedProviderBody)
+        .map_err(|_| TransportError::InvalidAdmission);
     }
     normalize_for_dispatch(request, selection.response_contract())
 }
@@ -212,10 +228,14 @@ fn effective_effort(request: &ResponsesRequest) -> crate::model::Effort {
 fn deepseek_request(
     request: &ResponsesRequest,
     limits: super::InferenceLimits,
+    authored: &[bool],
 ) -> Result<Value, TransportError> {
     use super::UnsupportedSemantics as Unsupported;
     let refuse = |kind| TransportError::UnsupportedSemantics(kind);
-    if request.model.is_empty() || !request.session_id.valid() {
+    if request.model.is_empty()
+        || !request.session_id.valid()
+        || authored.len() != request.input.len()
+    {
         return Err(TransportError::InvalidAdmission);
     }
     if effective_effort(request) == crate::model::Effort::Medium {
@@ -253,7 +273,7 @@ fn deepseek_request(
         }
     }
     let mut input = Vec::new();
-    for original in &request.input {
+    for (original, authored) in request.input.iter().zip(authored) {
         if original.is_configuration_update() {
             continue;
         }
@@ -280,6 +300,9 @@ fn deepseek_request(
                 // DeepSeek treats developer as user. Keep authored policy at its
                 // original position by explicitly selecting the supported system role.
                 if role == "developer" {
+                    if !authored {
+                        return Err(refuse(Unsupported::Message));
+                    }
                     item["role"] = Value::String("system".into());
                 }
             }

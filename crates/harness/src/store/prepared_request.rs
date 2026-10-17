@@ -153,7 +153,14 @@ impl Store {
             }
             projected
         };
-        let body = client::normalize_for_selection(&request, &selection)?;
+        // context_note is issued by the authored seed/context owner, while
+        // unretained messages passed the explicit host-authored admission above.
+        // A role spelling or an absent provider envelope is not authorship proof.
+        let authored = occurrences
+            .iter()
+            .map(|occurrence| occurrence.as_ref().is_none_or(|occurrence| occurrence.note))
+            .collect::<Vec<_>>();
+        let body = client::normalize_for_selection(&request, &selection, &authored)?;
         let hashes = request
             .input
             .iter()
