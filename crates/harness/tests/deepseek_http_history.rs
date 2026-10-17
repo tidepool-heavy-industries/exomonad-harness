@@ -22,6 +22,7 @@ use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, sync::Arc, tim
 
 const SYNTHETIC_KEY: &str = "offline-fixture-not-a-provider-key";
 const UNICODE: &str = "λ → \"quoted\"\\path\n第二行 🪼";
+const REASONING: &str = "offline reasoning marker — 独立 λ 🪼";
 
 struct Files(PathBuf);
 
@@ -119,7 +120,7 @@ async fn next_http(
 fn reasoning() -> Value {
     // Includes the empty summary present in the official response example.
     json!({"type":"reasoning","id":"reasoning-1","status":"completed","summary":[],
-        "content":[{"type":"reasoning_text","text":UNICODE}]})
+        "content":[{"type":"reasoning_text","text":REASONING}]})
 }
 
 fn assistant(text: &str) -> Value {
