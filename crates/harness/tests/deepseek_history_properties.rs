@@ -392,6 +392,7 @@ async fn http_reasoning_transactions_preserve_originals_across_edit_refusal_and_
     )
     .await;
     let canonical = store.items(&original_head).unwrap();
+    let canonical_history = store.context_history(&original_head).unwrap();
     for (index, (edit, expected, rejected)) in [
         (
             Edit::Replace("authored first λ".into()),
@@ -439,6 +440,10 @@ async fn http_reasoning_transactions_preserve_originals_across_edit_refusal_and_
             other => panic!("unexpected actual transaction outcome: {other:?}"),
         }
         assert_eq!(store.items(&original_head).unwrap(), canonical);
+        assert_eq!(
+            store.context_history(&original_head).unwrap(),
+            canonical_history
+        );
     }
     assert!(editor.edits.lock().unwrap().is_empty());
     drop(conversation);
@@ -448,6 +453,10 @@ async fn http_reasoning_transactions_preserve_originals_across_edit_refusal_and_
     drop(store);
     let reopened = Store::open(path).unwrap();
     assert_eq!(reopened.items(&original_head).unwrap(), canonical);
+    assert_eq!(
+        reopened.context_history(&original_head).unwrap(),
+        canonical_history
+    );
     let originals = reopened
         .items(&original_head)
         .unwrap()
