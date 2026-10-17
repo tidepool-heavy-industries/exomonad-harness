@@ -187,6 +187,7 @@ impl Store {
         let sources = occurrences
             .iter()
             .flatten()
+            .filter(|o| !o.note && o.item.0["type"] == "message" && o.item.0["role"] == "developer")
             .map(|o| o.origin.clone())
             .collect::<HashSet<_>>();
         let requests = sources

@@ -174,7 +174,10 @@ impl Store {
         // Editable context notes and protected committed hook annotations have
         // separate issuers. Unretained messages passed host-authored admission
         // above; role spelling and absent provider envelopes prove neither.
-        let hook_notes = self.model_tool_note_origins(occurrences)?;
+        let hook_notes = match contract.0 {
+            ResponsesRoute::ChatGptPlan => std::collections::HashSet::new(),
+            ResponsesRoute::DeepSeek => self.model_tool_note_origins(occurrences)?,
+        };
         let authored = occurrences
             .iter()
             .map(|occurrence| {
