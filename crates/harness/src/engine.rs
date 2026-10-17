@@ -1512,7 +1512,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
         }
         if let Some(turn) = &recorded_response {
-            if is_final(turn, finalize_schema.is_some())
+            let finality = match self
+                .store
+                .provider_response_selection(head.as_ref().expect("pending request"))?
+            {
+                Some((route, _, crate::store::ProviderResponseState::Completed)) => {
+                    Some(route.response_finality())
+                }
+                Some(_) => None,
+                None => Some(crate::transport::ResponseFinality::ExplicitPhase),
+            };
+            if finality.is_some_and(|profile| is_final(turn, finalize_schema.is_some(), profile))
                 && initial.is_empty()
                 && !pending
                     .iter()
@@ -1716,6 +1726,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 })
                 .collect::<HashMap<_, _>>();
             let contract = history.contract.clone();
+            let response_finality = contract.response_contract().0.response_finality();
             let continuing_model = history
                 .model
                 .clone()
@@ -2526,7 +2537,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     });
                 }
             } else if !had_inline_wait
-                && is_final(&turn, finalize_schema.is_some())
+                && is_final(&turn, finalize_schema.is_some(), response_finality)
                 && pending
                     .iter()
                     .any(|call| call.completion == PendingCompletion::BlocksCompletion)
@@ -2558,7 +2569,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             } else if !had_inline_wait
                 && !had_sync_calls
                 && !settled_this_turn.requires_observation
-                && is_final(&turn, finalize_schema.is_some())
+                && is_final(&turn, finalize_schema.is_some(), response_finality)
                 && !pending
                     .iter()
                     .any(|call| call.completion == PendingCompletion::BlocksCompletion)
@@ -4940,14 +4951,78 @@ fn is_finalize_call(item: &Item) -> bool {
     item.0["type"] == "function_call" && item.0["name"] == FINALIZE_TOOL_NAME
 }
 
-fn is_final(turn: &ResponsesTurn, finalized: bool) -> bool {
-    turn.items.iter().any(|item| {
-        if finalized {
-            is_finalize_call(item)
-        } else {
-            item.0["phase"] == "final_answer"
+fn is_final(
+    turn: &ResponsesTurn,
+    finalized: bool,
+    profile: crate::transport::ResponseFinality,
+) -> bool {
+    if finalized {
+        return turn.items.iter().any(is_finalize_call);
+    }
+    match profile {
+        crate::transport::ResponseFinality::ExplicitPhase => turn
+            .items
+            .iter()
+            .any(|item| item.0["phase"] == "final_answer"),
+        crate::transport::ResponseFinality::CompletedAssistantText => {
+            !turn.items.iter().any(|item| {
+                matches!(
+                    item.0["type"].as_str(),
+                    Some("function_call" | "custom_tool_call")
+                )
+            }) && turn.items.iter().any(|item| {
+                item.0["type"] == "message"
+                    && item.0["role"] == "assistant"
+                    && item.0["content"].as_array().is_some_and(|content| {
+                        content
+                            .iter()
+                            .any(|part| part["type"] == "output_text" && part["text"].is_string())
+                    })
+            })
         }
-    })
+    }
+}
+
+#[cfg(test)]
+mod response_finality_tests {
+    use super::*;
+    #[test]
+    fn issued_finality_keeps_phase_text_calls_and_finalize_distinct() {
+        use crate::transport::ResponseFinality::{CompletedAssistantText, ExplicitPhase};
+        let message = Item(
+            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}),
+        );
+        let mut turn = ResponsesTurn {
+            response_id: "response".into(),
+            items: vec![message.clone()],
+            usage: Usage::default(),
+        };
+        assert!(is_final(&turn, false, CompletedAssistantText));
+        assert!(!is_final(&turn, false, ExplicitPhase));
+        assert!(!is_final(&turn, true, CompletedAssistantText));
+        assert!(message.0.get("phase").is_none());
+        turn.items.push(Item(
+            json!({"type":"function_call","name":"tool","call_id":"call","arguments":"{}"}),
+        ));
+        assert!(!is_final(&turn, false, CompletedAssistantText));
+        turn.items = vec![Item(
+            json!({"type":"reasoning","content":[{"type":"reasoning_text","text":"thought"}]}),
+        )];
+        assert!(!is_final(&turn, false, CompletedAssistantText));
+        turn.items = vec![Item(
+            json!({"type":"message","role":"user","content":[{"type":"output_text","text":"not final"}]}),
+        )];
+        assert!(!is_final(&turn, false, CompletedAssistantText));
+        turn.items = vec![Item(
+            json!({"type":"message","role":"assistant","phase":"final_answer","content":[]}),
+        )];
+        assert!(is_final(&turn, false, ExplicitPhase));
+        assert!(!is_final(&turn, false, CompletedAssistantText));
+        turn.items = vec![Item(
+            json!({"type":"function_call","name":"finalize","call_id":"final","arguments":"{}"}),
+        )];
+        assert!(is_final(&turn, true, CompletedAssistantText));
+    }
 }
 
 /// `until` is elapsed seconds, never a wall-clock timestamp. Strict schema
