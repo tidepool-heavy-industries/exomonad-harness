@@ -1367,7 +1367,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .invocation_item(&claim.operation.request, &claim.call_id)?
                 .ok_or_else(|| EngineError::MissingOperationInvocation(claim.operation.clone()))?;
             let tool_kind = invocation.input.kind();
-            let execution = invocation.execution;
+            let execution = self.provider.operation_execution(&claim.operation, &invocation, self.client.response_contract()?.0.tool_encoding_profile())?;
             let same_call = |item: &Item| {
                 item.tool_call()
                     .ok()
@@ -1654,7 +1654,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .find_map(Item::configuration_effort)
                 .ok_or(EngineError::MissingEffortPin)?;
             let snapshot = tokio::select! {
-                result = self.provider.request_snapshot() => result,
+                result = self.provider.request_snapshot_with_encoding(self.client.response_contract()?.0.tool_encoding_profile()) => result,
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() {
                         return Err(EngineError::Cancelled { head_request: Some(parent.clone()) });
@@ -1762,10 +1762,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 session_id: self.config.session_id.clone(),
                 prompt_cache_comparison: self.prompt_cache_comparison.clone(),
             };
-            if let Some(version) = request_provider.tool_surface_version() {
+            if let Some(evidence) = request_provider.tool_surface_evidence() {
                 let store = self.store.clone();
                 let request = parent.clone();
-                let evidence = json!({"version":version});
                 if let Err(error) =
                     blocking(move || store.record_event(Some(&request), "tool_surface", &evidence))
                         .await
@@ -2790,7 +2789,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
     async fn snapshot_provider(&self) -> Result<Arc<dyn Provider>, EngineError> {
         Ok(self
             .provider
-            .request_snapshot()
+            .request_snapshot_with_encoding(self.client.response_contract()?.0.tool_encoding_profile())
             .await?
             .unwrap_or_else(|| self.provider.clone()))
     }
@@ -2881,6 +2880,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .map_err(|_| EngineError::InvalidFunctionCall)?
             .ok_or(EngineError::InvalidFunctionCall)?;
         let settlement_owner = ToolSettlementOwner::for_invocation(&call);
+        let execution = if settlement_owner == ToolSettlementOwner::EngineYield { call.execution } else { provider.operation_execution(&OperationId {
+            origin: self.origin.clone(), request: request.clone(), call: call.call_id.clone()
+        }, &call, self.client.response_contract()?.0.tool_encoding_profile())? };
         let call_id = call.call_id;
         let operation = OperationId {
             origin: self.origin.clone(),
@@ -2890,7 +2892,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let name = call.name;
         let input = call.input;
         let tool_kind = input.kind();
-        let execution = call.execution;
         let is_yield = settlement_owner == ToolSettlementOwner::EngineYield;
         let wait = if is_yield {
             if self.embedded_identity().is_none() || tool_kind != ToolKind::Function {
@@ -3004,7 +3005,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let index = pending.len() - 1;
         let policy_store = self.store.clone();
         let policy_request = request.clone();
-        let policy = json!({"operation":operation,"scheduling":scheduling});
+        let policy = json!({"operation":operation,"scheduling":scheduling,
+            "surface":provider.tool_surface_evidence(),
+            "execution": match execution { ToolExecution::Synchronous => "wait", ToolExecution::Asynchronous => "background" }});
         blocking(move || {
             policy_store.record_event(Some(&policy_request), "tool_scheduling", &policy)
         })

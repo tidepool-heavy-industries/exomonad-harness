@@ -513,6 +513,21 @@ pub trait Provider: Send + Sync {
         Ok(declared)
     }
 
+    /// Resolve execution from the exact issuing declaration without editing wire items.
+    fn operation_execution(&self, _operation: &OperationId, call: &crate::item::ToolCall,
+        profile: crate::transport::ToolEncodingProfile) -> Result<crate::item::ToolExecution, ProviderError> {
+        if profile == crate::transport::ToolEncodingProfile::Native { Ok(call.execution) }
+        else { Err(ProviderError::Tool("provider has no installed tool encoding".into())) }
+    }
+    async fn request_snapshot_with_encoding(&self, profile: crate::transport::ToolEncodingProfile)
+        -> Result<Option<Arc<dyn Provider>>, ProviderError> {
+        if profile == crate::transport::ToolEncodingProfile::Native { self.request_snapshot().await }
+        else { Err(ProviderError::Tool("provider has no installed tool encoding".into())) }
+    }
+    fn tool_surface_evidence(&self) -> Option<Value> {
+        self.tool_surface_version().map(|version| serde_json::json!({"version":version}))
+    }
+
     /// A stable view retained for an entire model request, including its later
     /// tool calls. Reloadable providers return an immutable snapshot here.
     async fn request_snapshot(

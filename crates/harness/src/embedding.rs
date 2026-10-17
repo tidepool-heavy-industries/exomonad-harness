@@ -6,6 +6,10 @@ use crate::{
     provider::{CallContext, CancellationOwner, Provider, ProviderError, ToolScheduling},
     store::{EmbeddedInputState, Store, StoreError},
 };
+mod tool_encoding;
+use tool_encoding::EncodingMap;
+use crate::transport::ToolEncodingProfile;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -305,6 +309,7 @@ pub struct ToolSurface {
     version: String,
     manifest: Arc<EmbeddedToolManifest>,
     dispatcher: Arc<dyn Provider>,
+    encoding: Option<EncodingMap>,
 }
 
 /// Validated declarations shared by requests from one immutable installation.
@@ -312,6 +317,7 @@ pub struct EmbeddedToolManifest {
     tools: crate::transport::ToolManifest,
     kinds: HashMap<String, ToolKind>,
     scheduling: HashMap<String, ToolScheduling>,
+    text_fields: HashMap<String, String>,
 }
 
 impl EmbeddedToolManifest {
@@ -368,7 +374,25 @@ impl EmbeddedToolManifest {
             tools,
             kinds,
             scheduling,
+            text_fields: HashMap::new(),
         })
+    }
+
+    /// Text-field vocabulary is supplied by the admitted host declaration.
+    pub fn with_text_fields(
+        tools: Vec<Value>,
+        scheduling: HashMap<String, ToolScheduling>,
+        text_fields: HashMap<String, String>,
+    ) -> Result<Self, EmbeddedError> {
+        let mut manifest = Self::with_scheduling(tools, scheduling)?;
+        for (name, field) in &text_fields {
+            if manifest.kinds.get(name) != Some(&ToolKind::Custom)
+                || field.is_empty() || field == "delivery" {
+                return Err(EmbeddedError::Surface(format!("invalid custom text field for {name}")));
+            }
+        }
+        manifest.text_fields = text_fields;
+        Ok(manifest)
     }
 
     pub fn tools(&self) -> &crate::transport::ToolManifest {
@@ -401,8 +425,24 @@ impl ToolSurface {
             version,
             manifest,
             dispatcher,
+            encoding: None,
         })
     }
+
+    /// Publish wire declarations and their exact decoder as one installation.
+    pub fn with_encoding(&self, profile: ToolEncodingProfile) -> Result<Self, EmbeddedError> {
+        if self.encoding.is_some() {
+            return Err(EmbeddedError::Surface("tool surface already encoded".into()));
+        }
+        if profile == ToolEncodingProfile::Native {
+            return Ok(Self { version: self.version.clone(), manifest: self.manifest.clone(),
+                dispatcher: self.dispatcher.clone(), encoding: None });
+        }
+        let (manifest, encoding) = EncodingMap::project(&self.manifest, profile)?;
+        Ok(Self { version: self.version.clone(), manifest: Arc::new(manifest),
+            dispatcher: self.dispatcher.clone(), encoding: Some(encoding) })
+    }
+
     pub fn version(&self) -> &str {
         &self.version
     }
@@ -779,13 +819,14 @@ impl PinnedProvider {
         if !recorded.is_some_and(|call| call.name == name && &call.input == input) {
             return Err(fail("call does not match durable invocation"));
         }
-        let version = self
-            .store
-            .latest_tool_surface(request)
-            .map_err(|e| fail(&e.to_string()))?;
-        if version.as_ref().and_then(|value| value["version"].as_str())
-            != Some(self.surface.version())
-        {
+        let evidence = if self.surface.encoding.is_some() {
+            Some(tool_encoding::operation_surface(&self.store, operation)?)
+        } else {
+            self.store.latest_tool_surface(request).map_err(|e| fail(&e.to_string()))?
+        };
+        let expected = self.tool_surface_evidence();
+        if evidence.as_ref().and_then(|value| value["version"].as_str()) != Some(self.surface.version())
+            || (self.surface.encoding.is_some() && evidence != expected) {
             return Err(fail("request did not publish this tool surface"));
         }
         Ok(())
@@ -849,7 +890,16 @@ impl Provider for BoundProvider {
             .map_err(|error| ProviderError::Tool(error.into()))
     }
 
+    fn operation_execution(&self, operation: &crate::model::OperationId, call: &crate::item::ToolCall,
+        profile: ToolEncodingProfile) -> Result<crate::item::ToolExecution, ProviderError> {
+        tool_encoding::recorded_execution(&self.store, operation, call, profile)
+    }
+
     async fn request_snapshot(&self) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
+        self.request_snapshot_with_encoding(ToolEncodingProfile::Native).await
+    }
+
+    async fn request_snapshot_with_encoding(&self, profile: ToolEncodingProfile) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
         let surface = self
             .host
             .tool_surface()
@@ -858,6 +908,8 @@ impl Provider for BoundProvider {
                 EmbeddedError::AdmissionClosed => ProviderError::RequestAdmissionClosed,
                 error => ProviderError::Tool(error.to_string().into()),
             })?;
+        let surface = Arc::new(surface.with_encoding(profile)
+            .map_err(|e| ProviderError::Tool(e.to_string().into()))?);
         Ok(Some(Arc::new(PinnedProvider {
             store: self.store.clone(),
             host: self.host.clone(),
@@ -916,6 +968,19 @@ impl Provider for PinnedProvider {
     fn tool_surface_version(&self) -> Option<&str> {
         Some(self.surface.version())
     }
+    fn tool_surface_evidence(&self) -> Option<Value> {
+        Some(serde_json::json!({"version":self.surface.version(),"encoding":self.surface.encoding}))
+    }
+    fn operation_execution(&self, operation: &crate::model::OperationId, call: &crate::item::ToolCall,
+        profile: ToolEncodingProfile) -> Result<crate::item::ToolExecution, ProviderError> {
+        let _ = operation;
+        match (&self.surface.encoding, profile) {
+            (Some(map), ToolEncodingProfile::FunctionOnlyExplicitDelivery) => map.execution(call),
+            (None, ToolEncodingProfile::Native) => Ok(call.execution),
+            _ => Err(ProviderError::Tool("issuing tool encoding profile mismatch".into())),
+        }
+    }
+
     fn validate_call(&self, name: &str, kind: ToolKind) -> Result<(), ProviderError> {
         if self.surface.manifest.kinds.get(name) == Some(&kind) {
             Ok(())
@@ -954,37 +1019,32 @@ impl Provider for PinnedProvider {
         if let Err(error) = self.validate(name, &input, &context).await {
             return crate::provider::ProviderCompletion::unedited(Err(error.into_tool_failure()));
         }
+        let input = match &self.surface.encoding {
+            Some(encoding) => match encoding.decode(name, input) {
+                Ok((input, _)) => input,
+                Err(error) => return crate::provider::ProviderCompletion::unedited(Err(error.into_tool_failure())),
+            },
+            None => input,
+        };
         self.surface
             .dispatcher
             .complete_call(name, input, context)
             .await
     }
-    async fn call_with_context(
-        &self,
-        name: &str,
-        args: Value,
-        context: CallContext,
-    ) -> Result<Value, ProviderError> {
-        self.validate(name, &ToolInput::Function(args.clone()), &context)
-            .await?;
-        self.surface
-            .dispatcher
-            .call_with_context(name, args, context)
-            .await
+    async fn call_with_context(&self, name: &str, args: Value, context: CallContext) -> Result<Value, ProviderError> {
+        let input = ToolInput::Function(args);
+        self.validate(name, &input, &context).await?;
+        let input = match &self.surface.encoding { Some(map) => map.decode(name, input)?.0, None => input };
+        match input {
+            ToolInput::Function(args) => self.surface.dispatcher.call_with_context(name, args, context).await,
+            ToolInput::Custom(source) => self.surface.dispatcher.call_custom_with_context(name, source, context).await,
+        }
     }
-    async fn call_custom_with_context(
-        &self,
-        name: &str,
-        input: String,
-        context: CallContext,
-    ) -> Result<Value, ProviderError> {
-        self.validate(name, &ToolInput::Custom(input.clone()), &context)
-            .await?;
-        self.surface
-            .dispatcher
-            .call_custom_with_context(name, input, context)
-            .await
+    async fn call_custom_with_context(&self, name: &str, input: String, context: CallContext) -> Result<Value, ProviderError> {
+        self.validate(name, &ToolInput::Custom(input.clone()), &context).await?;
+        self.surface.dispatcher.call_custom_with_context(name, input, context).await
     }
+
 }
 
 #[cfg(test)]
