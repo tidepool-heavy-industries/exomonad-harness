@@ -1877,6 +1877,46 @@ impl Store {
         })
     }
 
+    /// Observe the actual current head and effective selection in one snapshot.
+    pub fn effective_inference_selection(
+        &self,
+        identity: &ConversationIdentity,
+        default_model: &str,
+        default_effort: crate::model::Effort,
+    ) -> Result<crate::context::EffectiveInferenceSelection> {
+        let mut c = self.lock()?;
+        c.read_transaction(|tx| {
+            validate_identity(tx, &self.store_id, identity)?;
+            let head: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT head_request FROM agents WHERE path=?1",
+                    [&identity.actor().0],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let head = head.ok_or(ContextError::UnsupportedState)?.map(RequestId);
+            let current = state(tx, identity)?;
+            let items = match &head {
+                Some(head) => context_request_state_tx(
+                    tx,
+                    head,
+                    identity,
+                    current.route.zip(current.protocol),
+                )?
+                .history
+                .into_iter()
+                .map(|(_, _, item)| item)
+                .collect::<Vec<_>>(),
+                None => Vec::new(),
+            };
+            Ok(crate::context::EffectiveInferenceSelection {
+                model: current.model.unwrap_or_else(|| default_model.into()),
+                effort: Item::effective_effort(&items, default_effort),
+                head,
+            })
+        })
+    }
+
     pub fn context_model(&self, identity: &ConversationIdentity) -> Result<Option<String>> {
         let c = self.lock()?;
         validate_identity(&c, &self.store_id, identity)?;

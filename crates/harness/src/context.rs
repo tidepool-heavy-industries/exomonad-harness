@@ -15,6 +15,14 @@ pub struct ContextProjectionTarget {
     pub protocol: crate::transport::ResponsesProtocol,
 }
 
+/// Resolved current inference choices observed together at the owning head.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectiveInferenceSelection {
+    pub model: String,
+    pub effort: Effort,
+    pub head: Option<RequestId>,
+}
+
 /// Exact continuity losses from an explicitly selected visible-history recovery.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
