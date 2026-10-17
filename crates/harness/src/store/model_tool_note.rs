@@ -54,8 +54,14 @@ fn annotation_item(
     validate_replay_output(&operation.call, issued.call.input.kind(), &output)?;
     // Cleanup may retain a completed terminal without publishing ordinary
     // history. The terminal owner validates all exact claims and formats.
-    let (hash, _, _) =
+    let (hash, terminal, _) =
         super::terminal::exact_terminal(c, operation)?.ok_or_else(|| invalid(result_event))?;
+    if !matches!(
+        terminal,
+        super::terminal::TerminalOutcome::Success | super::terminal::TerminalOutcome::Failure(_)
+    ) {
+        return Err(invalid(result_event));
+    }
     let retained: String =
         c.query_row("SELECT json FROM items WHERE hash=?1", [&hash.0], |row| {
             row.get(0)
