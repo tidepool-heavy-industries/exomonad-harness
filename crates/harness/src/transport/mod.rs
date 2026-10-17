@@ -22,7 +22,7 @@ mod usage;
 pub use crate::store::PreparedProviderRequest;
 pub use request_failure::RequestFailure;
 pub(crate) use request_failure::TransportFailureKind;
-pub use usage::Usage;
+pub use usage::{RawUsage, Usage};
 
 use crate::item::Item;
 use crate::model::Effort;
