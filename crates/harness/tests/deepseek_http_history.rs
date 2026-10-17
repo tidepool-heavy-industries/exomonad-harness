@@ -3,33 +3,22 @@
 #[path = "support/deepseek_http.rs"]
 mod http_fixture;
 
-use async_trait::async_trait;
 use harness::{
-    engine::{Engine, EngineConfig, EngineError},
-    invocation::{CellBudget, Invocation, InvocationOptions, Limits, Outcome, Step},
+    engine::EngineConfig,
+    invocation::{CellBudget, Invocation, InvocationOptions, Limits, Outcome, Receipt, Step},
     item::Item,
     model::{AgentPath, CallId, Effort},
-    provider::{Provider, ProviderError},
     store::Store,
     transport::{
         Auth, CredentialReference, InferenceLimits, NativeTransportAdmission,
-        NativeTransportContract, ResponsesClient, ResponsesProtocol, ResponsesRoute,
-        TransportError, auth::DeepSeekAuth,
+        NativeTransportContract, RequestFailure, ResponsesClient, ResponsesProtocol,
+        ResponsesRoute, auth::DeepSeekAuth,
     },
     turn::JobScheduler,
 };
 use http_fixture::{HttpReply, LocalResponses, semantic_events};
 use serde_json::{Value, json};
-use std::{
-    io::Write,
-    os::unix::fs::OpenOptionsExt,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, sync::Arc, time::Duration};
 
 const SYNTHETIC_KEY: &str = "offline-fixture-not-a-provider-key";
 const UNICODE: &str = "λ → \"quoted\"\\path\n第二行 🪼";
@@ -70,20 +59,6 @@ impl Drop for Files {
     }
 }
 
-struct NoEffects(AtomicUsize);
-
-#[async_trait]
-impl Provider for NoEffects {
-    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        panic!("assistant-only completion must not execute a tool")
-    }
-
-    fn tools(&self) -> Vec<Value> {
-        vec![]
-    }
-}
-
 fn config(tools: Vec<Value>) -> EngineConfig {
     EngineConfig {
         instructions: "offline integration standing instruction".into(),
@@ -93,6 +68,38 @@ fn config(tools: Vec<Value>) -> EngineConfig {
         session_id: "deepseek-http-integration".into(),
         agent: AgentPath("/offline".into()),
     }
+}
+
+fn no_tools(auth: DeepSeekAuth, store: Arc<Store>, text: &str) -> Invocation {
+    Invocation::start::<DeepSeekAuth, _>(
+        ResponsesClient::new(auth),
+        store,
+        Arc::new(JobScheduler::new(1).unwrap()),
+        config(vec![]),
+        "http-owner".into(),
+        CellBudget::new(Limits {
+            requests: 1,
+            tools: 0,
+            reported_tokens: 1000,
+            seconds: 15,
+        }),
+        vec![Item::user_text(text)],
+        InvocationOptions::default(),
+    )
+    .unwrap()
+}
+
+async fn finished(invocation: &mut Invocation) -> Receipt {
+    let Step::Finished(receipt) = tokio::time::timeout(Duration::from_secs(5), invocation.next())
+        .await
+        .expect("local HTTP invocation must finish without another callback")
+    else {
+        panic!("a no-tool invocation must not deliver a callback or hook");
+    };
+    assert_eq!(receipt.counts.requests, 1);
+    assert_eq!(receipt.counts.tools, 0);
+    assert_eq!(receipt.requests.len(), 1);
+    receipt
 }
 
 fn reasoning() -> Value {
@@ -178,27 +185,7 @@ async fn documented_plaintext_completion_survives_http_fragmentation_and_durable
     let auth = files.auth(&server.endpoint);
     let expected_contract = auth.admission().unwrap().contract().clone();
     let store = Arc::new(Store::open(files.0.join("history.sqlite")).unwrap());
-    let effects = Arc::new(NoEffects(AtomicUsize::new(0)));
-    let jobs = Arc::new(JobScheduler::new(1).unwrap());
-    let engine = Engine::with_transport(
-        ResponsesClient::new(auth.clone()),
-        store.clone(),
-        jobs,
-        effects.clone(),
-        config(vec![]),
-    );
-    let (_cancel, cancelled) = tokio::sync::watch::channel(false);
-    let (_inbox, incoming) = tokio::sync::mpsc::unbounded_channel();
-    let running = tokio::spawn(async move {
-        engine
-            .run(
-                None,
-                vec![Item::user_text("answer without tools")],
-                cancelled,
-                incoming,
-            )
-            .await
-    });
+    let mut invocation = no_tools(auth, store.clone(), "answer without tools");
     let request = server.next().await;
     let body = assert_deepseek_request(&request.captured);
     assert_eq!(
@@ -210,23 +197,23 @@ async fn documented_plaintext_completion_survives_http_fragmentation_and_durable
         completed("documented", &items),
         &[1, 2, 7, 3],
     ));
-    let completion = tokio::time::timeout(Duration::from_secs(5), running)
-        .await
-        .unwrap()
-        .unwrap()
-        .expect("documented no-phase terminal message completes the production Engine");
+    let receipt = finished(&mut invocation).await;
+    assert!(
+        matches!(&receipt.outcome, Outcome::Text(text) if text == UNICODE),
+        "{:?}",
+        receipt.outcome
+    );
     assert_eq!(
-        completion
-            .turn
-            .items
+        receipt
+            .transcript
             .iter()
+            .filter(|item| matches!(item.0["id"].as_str(), Some("reasoning-1" | "message-1")))
             .map(|item| item.0.clone())
             .collect::<Vec<_>>(),
         items
     );
-    assert_eq!(effects.0.load(Ordering::SeqCst), 0);
-    let head = completion.head_request.clone();
-    drop(completion);
+    let head = receipt.requests[0].clone();
+    drop(invocation);
     drop(store);
 
     let reopened = Store::open(files.0.join("history.sqlite")).unwrap();
@@ -244,7 +231,6 @@ async fn documented_plaintext_completion_survives_http_fragmentation_and_durable
         reopened.native_transport_contract(&head).unwrap(),
         Some(expected_contract)
     );
-    assert_eq!(effects.0.load(Ordering::SeqCst), 0);
     server.finish().await;
 }
 
@@ -357,58 +343,50 @@ async fn http_rejections_retain_typed_causes_without_retry_or_effects() {
         let mut server = LocalResponses::start().await;
         let files = Files::new();
         let store = Arc::new(Store::memory().unwrap());
-        let effects = Arc::new(NoEffects(AtomicUsize::new(0)));
-        let engine = Engine::with_transport(
-            ResponsesClient::new(files.auth(&server.endpoint)),
+        let mut invocation = no_tools(
+            files.auth(&server.endpoint),
             store.clone(),
-            Arc::new(JobScheduler::new(1).unwrap()),
-            effects.clone(),
-            config(vec![]),
+            "do not retry a rejection",
         );
-        let (_cancel, cancelled) = tokio::sync::watch::channel(false);
-        let (_inbox, incoming) = tokio::sync::mpsc::unbounded_channel();
-        let running = tokio::spawn(async move {
-            engine
-                .run(
-                    None,
-                    vec![Item::user_text("do not retry a rejection")],
-                    cancelled,
-                    incoming,
-                )
-                .await
-        });
         let request = server.next().await;
         assert_deepseek_request(&request.captured);
         request.respond(HttpReply::json(axum::http::StatusCode::from_u16(status).unwrap(),
             json!({"error":{"code":"offline_rejected", "message":format!("refused {SYNTHETIC_KEY}")}})));
-        let error = tokio::time::timeout(Duration::from_secs(5), running)
-            .await
+        let receipt = finished(&mut invocation).await;
+        assert!(
+            matches!(receipt.outcome, Outcome::Failed(_)),
+            "{:?}",
+            receipt.outcome
+        );
+        let head_request = &receipt.requests[0];
+        let failures = store
+            .events(Some(head_request))
             .unwrap()
-            .unwrap()
-            .unwrap_err();
-        let EngineError::RequestRejected {
-            head_request,
-            error,
-        } = error
-        else {
-            panic!("HTTP {status} must retain exact rejection classification: {error:?}");
-        };
+            .into_iter()
+            .filter(|event| event.kind == "request_failed")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            failures.len(),
+            1,
+            "one exact durable refusal, no ordinary completion/retry"
+        );
+        let error: RequestFailure = serde_json::from_str(&failures[0].payload).unwrap();
         match status {
             401 => assert!(matches!(
                 &error,
-                TransportError::ProviderAuthentication {
+                RequestFailure::ProviderAuthentication {
                     route: ResponsesRoute::DeepSeek
                 }
             )),
             _ => assert!(
-                matches!(&error, TransportError::Http { status: actual, .. } if *actual == status)
+                matches!(&error, RequestFailure::Http { status: actual, .. } if *actual == status)
             ),
         }
         assert!(!format!("{error:?}").contains(SYNTHETIC_KEY));
-        assert_eq!(effects.0.load(Ordering::SeqCst), 0);
+        assert!(!format!("{:?}", receipt.outcome).contains(SYNTHETIC_KEY));
         assert!(
             store
-                .items(&head_request)
+                .items(head_request)
                 .unwrap()
                 .iter()
                 .all(|item| !matches!(
@@ -425,26 +403,7 @@ async fn completed_terminal_releases_client_before_http_eof() {
     let mut server = LocalResponses::start().await;
     let files = Files::new();
     let store = Arc::new(Store::memory().unwrap());
-    let effects = Arc::new(NoEffects(AtomicUsize::new(0)));
-    let engine = Engine::with_transport(
-        ResponsesClient::new(files.auth(&server.endpoint)),
-        store,
-        Arc::new(JobScheduler::new(1).unwrap()),
-        effects.clone(),
-        config(vec![]),
-    );
-    let (_cancel, cancelled) = tokio::sync::watch::channel(false);
-    let (_inbox, incoming) = tokio::sync::mpsc::unbounded_channel();
-    let running = tokio::spawn(async move {
-        engine
-            .run(
-                None,
-                vec![Item::user_text("complete before EOF")],
-                cancelled,
-                incoming,
-            )
-            .await
-    });
+    let mut invocation = no_tools(files.auth(&server.endpoint), store, "complete before EOF");
     let request = server.next().await;
     assert_deepseek_request(&request.captured);
     let (response, chunks) = HttpReply::controlled_sse();
@@ -456,13 +415,21 @@ async fn completed_terminal_releases_client_before_http_eof() {
         ))))
         .await
         .unwrap();
-    let completion = tokio::time::timeout(Duration::from_secs(5), running)
-        .await
-        .expect("terminal response must complete while the HTTP stream owner still retains EOF")
-        .unwrap()
-        .unwrap();
-    assert_eq!(completion.turn.items, vec![Item(assistant("done"))]);
-    assert_eq!(effects.0.load(Ordering::SeqCst), 0);
+    let receipt = finished(&mut invocation).await;
+    assert!(
+        matches!(&receipt.outcome, Outcome::Text(text) if text == "done"),
+        "{:?}",
+        receipt.outcome
+    );
+    assert_eq!(
+        receipt
+            .transcript
+            .iter()
+            .filter(|item| item.0["id"] == "message-1")
+            .map(|item| item.0.clone())
+            .collect::<Vec<_>>(),
+        vec![assistant("done")]
+    );
     drop(chunks);
     server.finish().await;
 }
