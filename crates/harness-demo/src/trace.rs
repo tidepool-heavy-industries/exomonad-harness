@@ -450,7 +450,7 @@ mod tests {
     impl harness::transport::Auth for OfflineAuth {
         fn admission(
             &self,
-        ) -> Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
+        ) -> std::result::Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
         {
             harness::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
                 "/offline/synthetic-credential",
