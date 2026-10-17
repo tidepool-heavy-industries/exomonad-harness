@@ -9,7 +9,8 @@ use harness::{
     context::{
         ContextBlock, ContextChange, ContextNativeKind, ContextPatch, ContextProblemCode,
         ContextReference, ContextTextSelector, ContextTransaction, ContextTransactionDraft,
-        ContextTransactionStatus, RetainedExchangeObservation, RetainedExchangeReference,
+        ContextTransactionStatus, ContextUnitVersion, RetainedExchangeObservation,
+        RetainedExchangeReference,
     },
     embedding::{
         AdmissionGuard, Conversation, EmbeddedError, EmbeddedToolManifest, HostActor, HostControl,
@@ -30,6 +31,7 @@ use harness::{
     turn::JobScheduler,
 };
 use http_fixture::{HttpReply, LocalResponses, semantic_events};
+use proptest::prelude::*;
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
@@ -365,12 +367,14 @@ async fn round(
         request = server.next() => request,
     };
     assert_eq!(first.captured.json()["model"], "deepseek-flash");
+    assert_eq!(first.captured.json()["reasoning"]["effort"], "high");
     first.respond(completed(&format!("{label}-first"), &first_output));
     if let Some(expected) = expected_projection {
         let next = tokio::select! {
             result = &mut running => panic!("round ended before its post-transaction HTTP request: {result:?}"),
             request = server.next() => request,
         };
+        assert_eq!(next.captured.json()["reasoning"]["effort"], "high");
         expected.assert_input(&next.captured.json());
         next.respond(completed(&format!("{label}-final"), &[assistant()]));
     }
@@ -512,6 +516,7 @@ async fn http_reasoning_transactions_preserve_originals_across_edit_refusal_and_
 const SOURCE_CALL: &str = "retained-source-call";
 const SOURCE_VALUE: &str = "actual source effect λ 🪼";
 
+#[derive(Clone, Copy, Debug)]
 enum ExchangeEdit {
     Remove,
     AppendTwice,
@@ -521,6 +526,7 @@ enum ExchangeEdit {
 struct RetainedSource {
     group: ContextReference,
     source: RetainedExchangeReference,
+    removal: ContextUnitVersion,
 }
 
 struct ExchangeEditor {
@@ -528,7 +534,7 @@ struct ExchangeEditor {
     actions: Mutex<VecDeque<ExchangeEdit>>,
     source_effects: Mutex<Vec<OperationId>>,
     retained: Mutex<Option<RetainedSource>>,
-    attempts: Mutex<Vec<(OperationId, ContextTransaction)>>,
+    attempts: Mutex<Vec<(OperationId, ContextTransaction, u64)>>,
 }
 
 #[async_trait]
@@ -589,9 +595,16 @@ impl Provider for ExchangeEditor {
             else {
                 panic!("actual successful source must already have an exact publication");
             };
+            let removal = inspection
+                .unit_versions
+                .iter()
+                .find(|version| &version.reference == groups[0])
+                .expect("the genuine active source also issues its removal version")
+                .clone();
             *authority = Some(RetainedSource {
                 group: groups[0].clone(),
                 source,
+                removal,
             });
         }
         let authority = authority.as_ref().unwrap();
@@ -614,7 +627,9 @@ impl Provider for ExchangeEditor {
                     .unit_versions
                     .iter()
                     .find(|version| version.reference == authority.group)
-                    .expect("the exact active source unit has an issued removal version");
+                    // Reusing an actually issued earlier version when the unit
+                    // is inactive deliberately exercises typed denial, not a skipped action.
+                    .unwrap_or(&authority.removal);
                 vec![ContextChange::RemoveContextUnit {
                     reference: version.reference.clone(),
                     expected: version.digest.clone(),
@@ -635,7 +650,7 @@ impl Provider for ExchangeEditor {
         self.attempts
             .lock()
             .unwrap()
-            .push((snapshot.operation, transaction));
+            .push((snapshot.operation, transaction, snapshot.generation));
         let mut completion = ProviderCompletion::unedited(Ok(json!({"editor":"completed"})));
         completion.context = ContextDisposition::Transaction(ContextTransactionDraft {
             patch,
@@ -648,6 +663,16 @@ impl Provider for ExchangeEditor {
 
 #[tokio::test]
 async fn http_exchange_transactions_reinsert_exact_success_without_reexecution() {
+    run_exchange_history(&[
+        (ExchangeEdit::Remove, false),
+        (ExchangeEdit::AppendTwice, false),
+        (ExchangeEdit::Remove, false),
+        (ExchangeEdit::Append, true),
+    ])
+    .await;
+}
+
+async fn run_exchange_history(actions: &[(ExchangeEdit, bool)]) {
     let mut server = LocalResponses::start().await;
     let files = Files::new();
     let auth = files.auth(&server.endpoint);
@@ -717,38 +742,49 @@ async fn http_exchange_transactions_reinsert_exact_success_without_reexecution()
     assert_eq!(original_terminal.terminal, TerminalOutcome::Success);
     assert_eq!(original_terminal.item.0, source_output);
     let original_history = store.context_history(&original_head).unwrap();
+    let original_pair = original_history
+        .iter()
+        .filter(|(_, _, item)| item.0["call_id"] == SOURCE_CALL)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(original_pair.len(), 2);
+    assert_eq!(original_pair[0].0, source_operation.request);
+    assert_eq!(original_pair[0].2.0, source_call);
+    assert_eq!(original_pair[1].2.0, source_output);
     let mut previous_head = original_head.clone();
-    for (index, (action, present)) in [
-        (ExchangeEdit::Remove, false),
-        (ExchangeEdit::AppendTwice, true),
-        (ExchangeEdit::Remove, false),
-        (ExchangeEdit::Append, true),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if index == 3 {
-            // A separate Store open only reads durable evidence. It supplies no
-            // editing snapshot; the still-live application issues the next cut.
-            let reopened_reader = Store::open(&path).unwrap();
+    // This model is independent of Store membership: only the authored action
+    // changes this bit. Wire and canonical observations never set it.
+    let mut present = true;
+    let mut expected_generation = None;
+    let mut transitions = [0usize; 5]; // remove, denied remove, restore, active append, reader
+    for (index, &(action, second_view)) in actions.iter().enumerate() {
+        if second_view {
+            // The application/Conversation stays live. This second connection
+            // only reads facts and supplies no snapshot, commit, or authority.
+            let reader = Store::open(&path).unwrap();
             assert_eq!(
-                reopened_reader.context_history(&original_head).unwrap(),
+                reader.context_history(&original_head).unwrap(),
                 original_history
             );
             assert_eq!(
-                reopened_reader
+                reader
                     .replay_tool_output_operation(&source_operation)
                     .unwrap(),
                 Some(original_terminal.clone())
             );
-            assert!(
-                reopened_reader
-                    .context_history(&previous_head)
-                    .unwrap()
-                    .iter()
-                    .all(|(_, _, item)| item.0["call_id"] != SOURCE_CALL)
-            );
-            drop(reopened_reader);
+            assert_active_pair(&reader, &previous_head, present, &original_pair, &editor);
+            transitions[4] += 1;
+        }
+        let was_present = present;
+        match action {
+            ExchangeEdit::Remove => {
+                transitions[usize::from(!present)] += 1;
+                present = false;
+            }
+            ExchangeEdit::Append | ExchangeEdit::AppendTwice => {
+                transitions[if present { 3 } else { 2 }] += 1;
+                present = true;
+            }
         }
         editor.actions.lock().unwrap().push_back(action);
         let label = format!("exchange-edit-{index}");
@@ -769,14 +805,43 @@ async fn http_exchange_transactions_reinsert_exact_success_without_reexecution()
         .await;
         let attempts = editor.attempts.lock().unwrap();
         assert_eq!(attempts.len(), index + 1);
-        let (operation, transaction) = attempts.last().unwrap();
-        let ContextTransactionStatus::Committed(receipt) = store
+        let (operation, transaction, observed_generation) = attempts.last().unwrap();
+        let generation = *expected_generation.get_or_insert(*observed_generation);
+        assert_eq!(
+            *observed_generation, generation,
+            "prior steps preserve the independently tracked version"
+        );
+        let status = store
             .context_transaction_status(&operation.origin, transaction)
-            .unwrap()
-        else {
-            panic!("genuine source action must commit, separately from tool completion");
-        };
-        assert!(receipt.changed);
+            .unwrap();
+        if matches!(action, ExchangeEdit::Remove) && !was_present {
+            let ContextTransactionStatus::Rejected(problems) = status else {
+                panic!("inactive removal must be refused, not silently skipped: {status:?}");
+            };
+            assert!(
+                problems
+                    .iter()
+                    .any(|problem| problem.code == ContextProblemCode::Denied)
+            );
+        } else {
+            let ContextTransactionStatus::Committed(receipt) = status else {
+                panic!(
+                    "valid generated action must commit separately from tool completion: {status:?}"
+                );
+            };
+            assert_eq!(
+                receipt.changed,
+                was_present != present,
+                "active append must be an actual no-op"
+            );
+            expected_generation = Some(generation + u64::from(was_present != present));
+            assert_eq!(
+                receipt.generation,
+                expected_generation.unwrap(),
+                "active duplicate append cannot advance the context version"
+            );
+        }
+        assert_active_pair(&store, &previous_head, present, &original_pair, &editor);
         assert_eq!(
             *editor.source_effects.lock().unwrap(),
             vec![source_operation.clone()],
@@ -801,5 +866,94 @@ async fn http_exchange_transactions_reinsert_exact_success_without_reexecution()
         );
     }
     assert!(editor.actions.lock().unwrap().is_empty());
+    let reader = Store::open(&path).unwrap();
+    assert_active_pair(&reader, &previous_head, present, &original_pair, &editor);
+    assert_eq!(
+        reader.context_history(&original_head).unwrap(),
+        original_history
+    );
+    assert_eq!(
+        reader
+            .replay_tool_output_operation(&source_operation)
+            .unwrap(),
+        Some(original_terminal)
+    );
+    transitions[4] += 1;
+    eprintln!(
+        "retained HTTP history {actions:?}: remove={}, denied_remove={}, restore={}, active_append={}, second_reader={}",
+        transitions[0], transitions[1], transitions[2], transitions[3], transitions[4]
+    );
     server.finish().await;
+}
+
+fn assert_active_pair(
+    reader: &Store,
+    head: &RequestId,
+    present: bool,
+    original_pair: &[(RequestId, harness::item::ItemHash, Item)],
+    editor: &ExchangeEditor,
+) {
+    let current = reader.context_history(head).unwrap();
+    let actual = current
+        .iter()
+        .filter(|(_, _, item)| item.0["call_id"] == SOURCE_CALL)
+        .map(|(_, hash, item)| (hash, item))
+        .collect::<Vec<_>>();
+    let expected = if present {
+        original_pair
+            .iter()
+            .map(|(_, hash, item)| (hash, item))
+            .collect()
+    } else {
+        vec![]
+    };
+    assert_eq!(
+        actual, expected,
+        "selected source hashes and literal pair remain exact"
+    );
+    if let Some(authority) = editor.retained.lock().unwrap().as_ref() {
+        let document = reader.read_context(head).unwrap();
+        let exact_groups = document
+            .blocks
+            .iter()
+            .filter(|block| {
+                matches!(block,
+            ContextBlock::Native { reference, kind: ContextNativeKind::CompletedExchange, .. }
+            if reference == &authority.group)
+            })
+            .count();
+        assert_eq!(
+            exact_groups,
+            usize::from(present),
+            "canonical source IDs remain the original owner-issued group"
+        );
+        if present {
+            // This pure inspection only checks a view against previously issued
+            // evidence; its result never authorizes an edit.
+            let visible = harness::context::inspect_context(&document);
+            let version = visible
+                .unit_versions
+                .iter()
+                .find(|version| version.reference == authority.group)
+                .unwrap();
+            assert_eq!(
+                *version, authority.removal,
+                "the exact restored source version stays unchanged"
+            );
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 16, max_shrink_iters: 128, failure_persistence: None, ..ProptestConfig::default() })]
+    #[test]
+    fn http_retained_exchange_generated_histories(
+        actions in prop::collection::vec((prop_oneof![Just(ExchangeEdit::Remove), Just(ExchangeEdit::Append), Just(ExchangeEdit::AppendTwice)], any::<bool>()), 1..7)
+    ) {
+        // Fresh ordinary application/HTTP/Store issuers for every generated or
+        // shrunk history. Output is scripted reasoning-free under EffortHigh;
+        // this does not request thinking-off or claim process restart recovery.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(run_exchange_history(&actions));
+    }
 }

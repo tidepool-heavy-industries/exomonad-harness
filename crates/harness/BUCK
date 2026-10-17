@@ -109,7 +109,7 @@ genrule(
 integration_test(name = "adapter_readiness", deps = [":harness"] + HARNESS_DEPS, extra_srcs = ["tests/support/replay.rs"])
 integration_test(name = "correction_wave", deps = [":harness"] + HARNESS_DEPS)
 integration_test(name = "custom_cell", deps = [":harness"] + HARNESS_DEPS)
-integration_test(name = "deepseek_history_properties", deps = [":harness"] + HARNESS_DEPS, extra_srcs = ["tests/support/deepseek_http.rs"])
+integration_test(name = "deepseek_history_properties", deps = [":harness"] + HARNESS_DEPS + ["//third-party/rust:proptest"], extra_srcs = ["tests/support/deepseek_http.rs"])
 integration_test(name = "deepseek_http_history", deps = [":harness"] + HARNESS_DEPS, extra_srcs = ["tests/support/deepseek_http.rs"])
 integration_test(name = "external_cancellation", deps = [":harness"] + HARNESS_DEPS)
 integration_test(name = "first_request_delivery", deps = [":harness"] + HARNESS_DEPS, extra_srcs = ["tests/support/replay.rs"])
