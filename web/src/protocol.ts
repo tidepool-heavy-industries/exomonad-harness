@@ -245,9 +245,15 @@ export function sameInferenceBlock(left: InferenceBlock, right: InferenceBlock):
     case 'provider_stream_failure': return b.kind === a.kind && a.event === b.event && sameDiagnostic(a.diagnostic, b.diagnostic);
     case 'request_rejected': {
       if (b.kind !== a.kind || a.failure.kind !== b.failure.kind) return false;
-      if (a.failure.kind === 'authentication') return true;
-      if (b.failure.kind !== 'http' || a.failure.status !== b.failure.status) return false;
-      return sameDiagnostic(a.failure.diagnostic, b.failure.diagnostic);
+      switch (a.failure.kind) {
+        case 'authentication': return b.failure.kind === 'authentication';
+        case 'credential_unavailable': return b.failure.kind === 'credential_unavailable'
+          && a.failure.route === b.failure.route && a.failure.reason === b.failure.reason;
+        case 'provider_authentication': return b.failure.kind === 'provider_authentication'
+          && a.failure.route === b.failure.route;
+        case 'http': return b.failure.kind === 'http' && a.failure.status === b.failure.status
+          && sameDiagnostic(a.failure.diagnostic, b.failure.diagnostic);
+      }
     }
     case 'response_incomplete': return b.kind === a.kind && a.response_id === b.response_id && a.reason === b.reason;
     case 'continuity_unproven': case 'host_interrupted': return true;

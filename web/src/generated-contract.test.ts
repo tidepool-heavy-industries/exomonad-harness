@@ -5,8 +5,8 @@ import {
 } from './generated/validators.mjs';
 import samples from './generated/wire-samples.json';
 import type { HistoryPage } from './generated/history';
-import type { Snapshot } from './protocol';
-import { isEmbeddedCommandRecord as isAssociatedCommandRecord, sameInferenceBlock } from './protocol';
+import type { InferenceBlock, Snapshot } from './protocol';
+import { isEmbeddedCommandRecord as isAssociatedCommandRecord, isInferenceBlock, sameInferenceBlock } from './protocol';
 const rawFrames: unknown[] = samples.server;
 const frames = rawFrames.filter(isServerFrame);
 
@@ -69,6 +69,32 @@ describe('Rust-owned browser wire contracts', () => {
     expect(sameInferenceBlock(first, reordered)).toBe(true);
     expect(sameInferenceBlock(first, {...reordered, reason:{...reordered.reason, failure:{...reordered.reason.failure, diagnostic:{...reordered.reason.failure.diagnostic, param:null}}}})).toBe(true);
     expect(sameInferenceBlock(first, {...reordered, generation:'9007199254740994'})).toBe(false);
+  });
+
+  it('compares complete request refusal facts across providers and credential causes', () => {
+    type Failure = Extract<InferenceBlock['reason'], { kind: 'request_rejected' }>['failure'];
+    const failures: Failure[] = [
+      { kind: 'authentication' },
+      { kind: 'http', status: 400, diagnostic: null },
+      { kind: 'http', status: 401, diagnostic: null },
+      { kind: 'http', status: 400, diagnostic: { code: 'different' } },
+    ];
+    for (const route of ['chat_gpt_plan', 'deep_seek'] as const) {
+      failures.push({ kind: 'provider_authentication', route });
+      for (const reason of ['missing', 'unreadable', 'unsafe', 'invalid', 'worker_failed'] as const) {
+        failures.push({ kind: 'credential_unavailable', route, reason });
+      }
+    }
+    const blocks: InferenceBlock[] = failures.map(failure => ({
+      request: 'same-request', generation: '7', reason: { kind: 'request_rejected', failure },
+    }));
+    for (const block of blocks) expect(isInferenceBlock(block)).toBe(true);
+    // Each row changes one owner-issued refusal fact; only the diagonal is equal.
+    for (const [left, a] of blocks.entries()) {
+      for (const [right, b] of blocks.entries()) {
+        expect(sameInferenceBlock(a, b)).toBe(left === right);
+      }
+    }
   });
 
   it('keeps actor output history and live event bodies identical', () => {
