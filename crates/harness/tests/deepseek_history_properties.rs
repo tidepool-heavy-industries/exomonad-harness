@@ -966,7 +966,7 @@ fn assert_active_pair(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 16, max_shrink_iters: 128, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 16, max_shrink_iters: 128, failure_persistence: Some(Box::new(proptest::test_runner::FileFailurePersistence::Direct("proptest-regressions/deepseek-history.txt"))), ..ProptestConfig::default() })]
     #[test]
     fn http_retained_exchange_generated_histories(
         actions in prop::collection::vec((prop_oneof![Just(ExchangeEdit::Remove), Just(ExchangeEdit::Append), Just(ExchangeEdit::AppendTwice)], any::<bool>()), 1..7)
