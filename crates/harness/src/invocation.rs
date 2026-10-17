@@ -705,7 +705,22 @@ impl Invocation {
         let (tools, encoding) = if profile == crate::transport::ToolEncodingProfile::Native {
             (tools, None)
         } else {
-            let manifest = crate::embedding::EmbeddedToolManifest::new(tools)?;
+            // Bounded callbacks already wait for each native result before
+            // inference. Their wire contract cannot offer background delivery.
+            let scheduling = tools
+                .iter()
+                .map(|tool| {
+                    (
+                        tool["name"]
+                            .as_str()
+                            .expect("validated callback name")
+                            .to_owned(),
+                        crate::provider::ToolScheduling::BeforeNextInference,
+                    )
+                })
+                .collect();
+            let manifest =
+                crate::embedding::EmbeddedToolManifest::with_scheduling(tools, scheduling)?;
             let (manifest, encoding) =
                 crate::embedding::tool_encoding::EncodingMap::project(&manifest, profile)?;
             (manifest.tools().to_vec(), Some(encoding))
@@ -1016,6 +1031,87 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn function_only_bounded_callback_keeps_original_arguments_and_receipt() {
+        struct FunctionOnly {
+            turns: Mutex<VecDeque<ResponsesTurn>>,
+            requests: Arc<Mutex<Vec<crate::transport::ResponsesRequest>>>,
+        }
+        #[async_trait]
+        impl ResponsesTransport for FunctionOnly {
+            fn response_contract(
+                &self,
+            ) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+                Ok((ResponsesRoute::DeepSeek, ResponsesProtocol::Standard))
+            }
+            async fn create(
+                &self,
+                request: PreparedProviderRequest,
+            ) -> Result<ResponsesTurn, TransportError> {
+                self.requests
+                    .lock()
+                    .unwrap()
+                    .push(request.request().clone());
+                self.turns
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| TransportError::Stream("script exhausted".into()))
+            }
+        }
+        let store = Arc::new(Store::memory().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut invocation = Invocation::start::<TestAuth, _>(
+            FunctionOnly {
+                turns: Mutex::new(vec![turn(vec![call("bounded-function")]), final_turn()].into()),
+                requests: requests.clone(),
+            },
+            store.clone(),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            config(),
+            "bounded-function".into(),
+            CellBudget::new(Limits::default()),
+            vec![],
+            InvocationOptions::default(),
+        )
+        .unwrap();
+        let callback = match invocation.next().await {
+            Step::Callback(callback) => callback,
+            _ => panic!("original native callback must be reached"),
+        };
+        assert_eq!(callback.arguments, json!({}));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            requests.lock().unwrap()[0].tools[0]["parameters"]["properties"],
+            json!({})
+        );
+        assert!(requests.lock().unwrap()[0].tools[0].get("async").is_none());
+        callback.complete(Ok(json!("native result"))).unwrap();
+        let receipt = finish(&mut invocation).await;
+        assert!(
+            matches!(receipt.outcome, Outcome::Text(_)),
+            "{:?}",
+            receipt.outcome
+        );
+        let call = receipt
+            .transcript
+            .iter()
+            .find(|item| {
+                item.0["call_id"] == "bounded-function" && item.0["type"] == "function_call"
+            })
+            .unwrap();
+        assert_eq!(call.0["arguments"], "{}");
+        assert_eq!(
+            receipt
+                .transcript
+                .iter()
+                .filter(|item| item.0["call_id"] == "bounded-function"
+                    && item.0["type"] == "function_call_output")
+                .count(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn callback_failure_metadata_reaches_authoritative_terminal_output() {
         let store = Arc::new(Store::memory().unwrap());
