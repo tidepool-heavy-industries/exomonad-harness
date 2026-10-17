@@ -100,6 +100,14 @@ pub enum ResponseEnd {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportFailureSummary {
     pub version: u8,
+    #[serde(default)]
+    pub usage: Option<super::Usage>,
+    #[serde(default)]
+    pub returned_model: Option<String>,
+    #[serde(default)]
+    pub returned_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub reported_max_output_tokens: Option<u64>,
     pub http_status: Option<u16>,
     pub server_request_id: Option<String>,
     pub content_type: Option<String>,
@@ -142,7 +150,11 @@ fn push_kind(tail: &mut Vec<EventKind>, value: EventKind) {
 impl TransportFailureSummary {
     pub(super) fn new(end: ResponseEnd) -> Self {
         Self {
-            version: 1,
+            version: 2,
+            usage: None,
+            returned_model: None,
+            returned_reasoning_effort: None,
+            reported_max_output_tokens: None,
             http_status: None,
             server_request_id: None,
             content_type: None,
@@ -163,6 +175,32 @@ impl TransportFailureSummary {
             terminal: None,
             end,
         }
+    }
+    pub(super) fn observe_response_metadata(
+        &mut self,
+        response: &serde_json::Value,
+        token: &str,
+        account: &str,
+    ) {
+        self.usage = Some(super::Usage::from_response_usage(response));
+        for (value, destination) in [
+            (response.get("model"), &mut self.returned_model),
+            (
+                response
+                    .get("reasoning")
+                    .and_then(|reasoning| reasoning.get("effort")),
+                &mut self.returned_reasoning_effort,
+            ),
+        ] {
+            if let Some(value) = value.and_then(serde_json::Value::as_str) {
+                let (value, truncated) = metadata(value, token, account);
+                self.metadata_truncated |= truncated;
+                *destination = Some(value);
+            }
+        }
+        self.reported_max_output_tokens = response
+            .get("max_output_tokens")
+            .and_then(serde_json::Value::as_u64);
     }
     pub(super) fn response(response: &reqwest::Response, token: &str, account: &str) -> Self {
         let mut value = Self::new(ResponseEnd::HttpRejected);

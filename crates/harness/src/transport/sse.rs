@@ -97,6 +97,16 @@ impl ResponseAssembly {
                 event.get("type").and_then(Value::as_str),
             ));
         }
+        if matches!(
+            event.get("type").and_then(Value::as_str),
+            Some("response.completed" | "response.incomplete" | "response.failed")
+        ) {
+            if let (Some(observation), Some(response)) =
+                (observation.as_deref_mut(), event.get("response"))
+            {
+                observation.observe_response_metadata(response, token, account);
+            }
+        }
         match event.get("type").and_then(Value::as_str) {
             Some("response.created") => {
                 let id = event
@@ -569,6 +579,63 @@ mod tests {
                 turn.usage.output_tokens,
                 usage.get("output_tokens").and_then(Value::as_u64)
             );
+        }
+    }
+
+    #[test]
+    fn terminal_usage_and_model_observations_survive_refusal_without_completion() {
+        for kind in [
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        ] {
+            for raw in [
+                None,
+                Some(Value::Null),
+                Some(json!({"input_tokens":0,"future":null})),
+            ] {
+                let mut response = json!({"id":"observed-terminal", "model":"deepseek-flash",
+                    "reasoning":{"effort":"high"},"max_output_tokens":2048,
+                    "output":[], "incomplete_details":{"reason":"max_output_tokens"},
+                    "error":{"code":"provider_failure","message":"failed"}});
+                if let Some(raw) = &raw {
+                    response["usage"] = raw.clone();
+                }
+                let mut observation = super::super::TransportFailureSummary::new(
+                    super::super::ResponseEnd::ProviderTerminal,
+                );
+                let mut assembly = ResponseAssembly::default();
+                let result = assembly.accept_observed(
+                    &json!({"type":kind,"response":response}).to_string(),
+                    "",
+                    "",
+                    Some(&mut observation),
+                );
+                assert_eq!(result.is_ok(), kind == "response.completed");
+                let usage = observation.usage.as_ref().unwrap();
+                assert_eq!(
+                    usage.raw,
+                    raw.map_or(
+                        super::super::usage::RawUsage::Unavailable,
+                        super::super::usage::RawUsage::Observed
+                    )
+                );
+                assert_eq!(
+                    observation.returned_model.as_deref(),
+                    Some("deepseek-flash")
+                );
+                assert_eq!(
+                    observation.returned_reasoning_effort.as_deref(),
+                    Some("high")
+                );
+                assert_eq!(observation.reported_max_output_tokens, Some(2048));
+                let restored: super::super::TransportFailureSummary =
+                    serde_json::from_value(serde_json::to_value(&observation).unwrap()).unwrap();
+                assert_eq!(restored, observation);
+                if kind != "response.completed" {
+                    assert!(assembly.finish().is_err());
+                }
+            }
         }
     }
 
