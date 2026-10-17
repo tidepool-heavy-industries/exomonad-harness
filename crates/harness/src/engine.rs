@@ -9442,7 +9442,7 @@ mod tests {
                 .zip([(Some(1), Some(0)), (None, None), (Some(1), Some(0))])
         {
             let payload: Value = serde_json::from_str(&event.payload).unwrap();
-            assert_eq!(payload["version"], 2);
+            assert_eq!(payload["version"], 3);
             let usage: Usage = serde_json::from_value(payload).unwrap();
             assert_eq!((usage.cached_tokens, usage.cache_write_tokens), expected);
         }
