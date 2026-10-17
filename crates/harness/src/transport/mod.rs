@@ -444,13 +444,12 @@ impl<A: Auth + Clone + 'static> ResponsesClient<A> {
     fn http(&self) -> Result<reqwest::Client, TransportError> {
         self.http
             .get_or_init(|| {
-                client::http_client_with_limits(
-                    self.admission()
-                        .map_err(|_| "invalid native admission")?
-                        .contract()
-                        .limits,
-                )
-                .map_err(|_| "HTTP client initialization failed")
+                let contract = self
+                    .admission()
+                    .map_err(|_| "invalid native admission")?
+                    .contract();
+                client::http_client_with_limits(contract.limits, contract.route)
+                    .map_err(|_| "HTTP client initialization failed")
             })
             .clone()
             .map_err(|message| TransportError::Stream(message.into()))

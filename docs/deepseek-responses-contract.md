@@ -48,3 +48,10 @@ admission handle and semaphore. Queue wait precedes credential access and HTTP
 execution; cancellation drops the owned permit and cannot dispatch queued work.
 Caller cancellation/deadline covers queue wait; HTTP timeout begins at dispatch.
 The existing tool scheduler is independent.
+
+The DeepSeek client explicitly disables reqwest automatic retries, including
+protocol NACK retries; redirects are also disabled. The OpenAI builder keeps its
+existing retry policy. Pinned reqwest 0.12.28 documents default protocol retries
+in https://github.com/seanmonstar/reqwest/blob/v0.12.28/src/retry.rs. Those retry
+classifiers are inactive in the current generated dependency features (no HTTP/2
+or HTTP/3), but DeepSeek's explicit policy does not depend on that feature set.

@@ -480,15 +480,24 @@ fn native_http_request(
 }
 
 pub(super) fn http_client() -> Result<reqwest::Client, TransportError> {
-    http_client_with_limits(super::InferenceLimits::chatgpt_default())
+    http_client_with_limits(
+        super::InferenceLimits::chatgpt_default(),
+        ResponsesRoute::ChatGptPlan,
+    )
 }
 pub(super) fn http_client_with_limits(
     limits: super::InferenceLimits,
+    route: ResponsesRoute,
 ) -> Result<reqwest::Client, TransportError> {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(limits.connect_timeout_secs))
         .timeout(Duration::from_secs(limits.total_timeout_secs))
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    let builder = match route {
+        ResponsesRoute::ChatGptPlan => builder,
+        ResponsesRoute::DeepSeek => builder.retry(reqwest::retry::never()),
+    };
+    builder
         .build()
         .map_err(|_| TransportError::Stream("HTTP client initialization failed".into()))
 }
