@@ -737,8 +737,10 @@ struct OfflineServerAuth;
 impl Auth for OfflineServerAuth {
     fn admission(
         &self,
-    ) -> std::result::Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
-    {
+    ) -> std::result::Result<
+        harness::transport::NativeTransportAdmission,
+        harness::transport::TransportError,
+    > {
         harness::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
             "/offline/synthetic-credential",
         ))
@@ -2602,6 +2604,10 @@ fn final_text(items: &[Item]) -> Option<String> {
 
 fn safe_transport_error(error: &TransportError) -> String {
     match error {
+        harness::transport::TransportError::InvalidAdmission
+        | harness::transport::TransportError::UnsupportedSemantics(_)
+        | harness::transport::TransportError::CredentialUnavailable { .. }
+        | harness::transport::TransportError::ProviderAuthentication { .. } => error.to_string(),
         harness::transport::TransportError::Authentication => {
             "authentication failed; sign in with the native ChatGPT plan account (credentials were not displayed)"
                 .into()
@@ -3866,8 +3872,10 @@ mod tests {
     impl Auth for FakeAuth {
         fn admission(
             &self,
-        ) -> std::result::Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
-        {
+        ) -> std::result::Result<
+            harness::transport::NativeTransportAdmission,
+            harness::transport::TransportError,
+        > {
             harness::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
                 "/offline/synthetic-credential",
             ))
