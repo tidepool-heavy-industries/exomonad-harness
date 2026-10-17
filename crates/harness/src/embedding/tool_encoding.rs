@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct EncodingMap {
+pub(crate) struct EncodingMap {
     profile: ToolEncodingProfile,
     rows: BTreeMap<String, Encoding>,
 }
@@ -21,7 +21,10 @@ enum Encoding {
 }
 
 impl EncodingMap {
-    pub(super) fn project(
+    pub(crate) fn profile(&self) -> ToolEncodingProfile {
+        self.profile
+    }
+    pub(crate) fn project(
         manifest: &EmbeddedToolManifest,
         profile: ToolEncodingProfile,
     ) -> Result<(EmbeddedToolManifest, Self), EmbeddedError> {
@@ -105,7 +108,7 @@ impl EncodingMap {
         Ok((projected, Self { profile, rows }))
     }
 
-    pub(super) fn decode(
+    pub(crate) fn decode(
         &self,
         name: &str,
         input: ToolInput,
@@ -157,7 +160,7 @@ impl EncodingMap {
         Ok((input, Some(execution)))
     }
 
-    pub(super) fn execution(&self, call: &ToolCall) -> Result<ToolExecution, ProviderError> {
+    pub(crate) fn execution(&self, call: &ToolCall) -> Result<ToolExecution, ProviderError> {
         self.decode(&call.name, call.input.clone())
             .map(|(_, execution)| {
                 execution.unwrap_or(if self.profile == ToolEncodingProfile::Native {

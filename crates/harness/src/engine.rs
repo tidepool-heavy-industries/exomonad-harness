@@ -1377,11 +1377,17 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .invocation_item(&claim.operation.request, &claim.call_id)?
                 .ok_or_else(|| EngineError::MissingOperationInvocation(claim.operation.clone()))?;
             let tool_kind = invocation.input.kind();
-            let execution = self.provider.operation_execution(
-                &claim.operation,
-                &invocation,
-                self.client.response_contract()?.0.tool_encoding_profile(),
-            )?;
+            let execution = if ToolSettlementOwner::for_invocation(&invocation)
+                == ToolSettlementOwner::EngineYield
+            {
+                invocation.execution
+            } else {
+                self.provider.operation_execution(
+                    &claim.operation,
+                    &invocation,
+                    self.client.response_contract()?.0.tool_encoding_profile(),
+                )?
+            };
             let same_call = |item: &Item| {
                 item.tool_call()
                     .ok()

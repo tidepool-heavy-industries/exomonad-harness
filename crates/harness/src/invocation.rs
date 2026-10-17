@@ -1,7 +1,7 @@
 //! Program-driven, bounded turns on the existing Engine and durable Store.
 use crate::{
     engine::{Engine, EngineConfig, ResponsesTransport},
-    item::{Item, ToolKind},
+    item::{Item, ToolInput, ToolKind},
     model::{AgentPath, RequestId},
     provider::{Provider, ProviderError, ToolFailure},
     store::Store,
@@ -215,6 +215,9 @@ impl Callback {
 }
 struct CallbackProvider {
     tools: Vec<Value>,
+    host_tools: Vec<Value>,
+    encoding: Option<crate::embedding::tool_encoding::EncodingMap>,
+    surface_version: String,
     budget: CellBudget,
     sender: mpsc::Sender<BridgeEvent>,
     store: Arc<Store>,
@@ -261,6 +264,42 @@ impl CallbackProvider {
 }
 #[async_trait]
 impl Provider for CallbackProvider {
+    async fn request_snapshot_with_encoding(
+        &self,
+        profile: crate::transport::ToolEncodingProfile,
+    ) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
+        let installed = self
+            .encoding
+            .as_ref()
+            .map(|map| map.profile())
+            .unwrap_or(crate::transport::ToolEncodingProfile::Native);
+        if installed != profile {
+            return Err(ProviderError::Tool(
+                "callback tool encoding profile mismatch".into(),
+            ));
+        }
+        Ok(None)
+    }
+    fn operation_execution(
+        &self,
+        _operation: &crate::model::OperationId,
+        call: &crate::item::ToolCall,
+        profile: crate::transport::ToolEncodingProfile,
+    ) -> Result<crate::item::ToolExecution, ProviderError> {
+        match &self.encoding {
+            Some(map) if map.profile() == profile => map.execution(call),
+            None if profile == crate::transport::ToolEncodingProfile::Native => Ok(call.execution),
+            _ => Err(ProviderError::Tool(
+                "callback tool encoding profile mismatch".into(),
+            )),
+        }
+    }
+    fn tool_surface_version(&self) -> Option<&str> {
+        Some(&self.surface_version)
+    }
+    fn tool_surface_evidence(&self) -> Option<Value> {
+        Some(serde_json::json!({"version":self.surface_version,"encoding":self.encoding}))
+    }
     fn model_visible_item(
         &self,
         request: &RequestId,
@@ -399,8 +438,19 @@ impl Provider for CallbackProvider {
         args: Value,
         context: crate::provider::CallContext,
     ) -> Result<Value, ProviderError> {
+        let args = match &self.encoding {
+            Some(map) => match map.decode(name, ToolInput::Function(args))?.0 {
+                ToolInput::Function(args) => args,
+                ToolInput::Custom(_) => {
+                    return Err(ProviderError::Tool(
+                        "callback requires structured arguments".into(),
+                    ));
+                }
+            },
+            None => args,
+        };
         let tool = self
-            .tools
+            .host_tools
             .iter()
             .find(|tool| tool["name"].as_str() == Some(name))
             .ok_or_else(|| ProviderError::Tool(format!("undeclared callback {name}").into()))?;
@@ -600,6 +650,16 @@ pub struct Invocation {
     identity: (String, String),
     finished: Option<Receipt>,
 }
+#[derive(Debug, thiserror::Error)]
+pub enum InvocationStartError {
+    #[error(transparent)]
+    Schema(#[from] crate::finalize::FinalizeError),
+    #[error(transparent)]
+    Transport(#[from] TransportError),
+    #[error(transparent)]
+    Surface(#[from] crate::embedding::EmbeddedError),
+}
+
 impl Invocation {
     pub fn start<A: Auth + 'static, C: ResponsesTransport + 'static>(
         transport: C,
@@ -610,7 +670,7 @@ impl Invocation {
         budget: CellBudget,
         initial: Vec<Item>,
         options: InvocationOptions,
-    ) -> Result<Self, crate::finalize::FinalizeError> {
+    ) -> Result<Self, InvocationStartError> {
         let mut names = std::collections::HashSet::new();
         for tool in &mut config.tools {
             let name = tool["name"]
@@ -626,7 +686,8 @@ impl Invocation {
             {
                 return Err(crate::finalize::FinalizeError::MalformedArguments(format!(
                     "duplicate, reserved or unsupported tool {name}"
-                )));
+                ))
+                .into());
             }
             tool["parameters"] =
                 crate::finalize::normalize_schema(tool["parameters"].clone(), "$input")?;
@@ -639,6 +700,16 @@ impl Invocation {
         config.agent = AgentPath(format!("model/{parent_cell}/{invocation_id}"));
         config.session_id = invocation_id.clone().into();
         let tools = std::mem::take(&mut config.tools);
+        let host_tools = tools.clone();
+        let profile = transport.response_contract()?.0.tool_encoding_profile();
+        let (tools, encoding) = if profile == crate::transport::ToolEncodingProfile::Native {
+            (tools, None)
+        } else {
+            let manifest = crate::embedding::EmbeddedToolManifest::new(tools)?;
+            let (manifest, encoding) =
+                crate::embedding::tool_encoding::EncodingMap::project(&manifest, profile)?;
+            (manifest.tools().to_vec(), Some(encoding))
+        };
         let (sender, callbacks) = mpsc::channel(1);
         let closed = Arc::new(AtomicBool::new(false));
         let closed_signal = tokio_util::sync::CancellationToken::new();
@@ -646,6 +717,9 @@ impl Invocation {
         let failure = Arc::new(Mutex::new(None));
         let provider = Arc::new(CallbackProvider {
             tools,
+            host_tools,
+            encoding,
+            surface_version: invocation_id.clone(),
             budget: budget.clone(),
             sender,
             store: store.clone(),

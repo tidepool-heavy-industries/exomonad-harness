@@ -6,7 +6,7 @@ use crate::{
     provider::{CallContext, CancellationOwner, Provider, ProviderError, ToolScheduling},
     store::{EmbeddedInputState, Store, StoreError},
 };
-mod tool_encoding;
+pub(crate) mod tool_encoding;
 use crate::transport::ToolEncodingProfile;
 use tool_encoding::EncodingMap;
 
