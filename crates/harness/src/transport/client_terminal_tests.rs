@@ -315,14 +315,18 @@ fn disposition(wire: &[u8], cuts: &[usize]) -> Disposition {
         let end = (position + width).min(wire.len());
         let (frames, error) = framer.push(&wire[position..end]);
         for frame in frames {
-            match assembly.accept(&frame.data) {
-                Ok(_) if assembly.is_complete() => {
-                    assert!(assembly.finish().is_ok());
+            match assembly.advance(&frame.data, "", "", None) {
+                Ok(super::super::assembly::AssemblyAdvance::Complete(_)) => {
+                    assert!(assembly.finish_complete().is_ok());
                     return Disposition::Completed;
                 }
-                Ok(_) => {}
-                Err(TransportError::ResponseIncomplete { .. }) => return Disposition::Incomplete,
-                Err(_) => return Disposition::ProtocolError,
+                Ok(super::super::assembly::AssemblyAdvance::Progress(_)) => {}
+                Ok(super::super::assembly::AssemblyAdvance::Stopped(
+                    super::super::assembly::DeclaredStop::Incomplete { .. },
+                )) => return Disposition::Incomplete,
+                Ok(super::super::assembly::AssemblyAdvance::Stopped(_)) | Err(_) => {
+                    return Disposition::ProtocolError;
+                }
             }
         }
         if error.is_some() {

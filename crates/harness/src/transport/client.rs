@@ -1313,3 +1313,7 @@ mod plan_tests;
 #[cfg(test)]
 #[path = "client_terminal_tests.rs"]
 mod terminal_tests;
+
+#[cfg(test)]
+#[path = "client_history_tests.rs"]
+mod history_tests;

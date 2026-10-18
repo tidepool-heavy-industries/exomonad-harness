@@ -718,3 +718,87 @@ proptest! {
         prop_assert_eq!(done.item(), &turn.items[0]);
     }
 }
+
+#[tokio::test]
+async fn native_completion_with_invalid_output_is_failed_and_blocked_after_reopen() {
+    // A native completion fact is preserved, but a missing output position
+    // cannot issue a successful turn, effect authority or interruption retry.
+    let http = LocalHttp::new(vec![wire(vec![
+        created("invalid-completion"),
+        json!({"event_type":"step.start","index":1,"step":output("gapped λ")}),
+        json!({"event_type":"step.stop","index":1}),
+        json!({"event_type":"interaction.completed","interaction":{"id":"invalid-completion","status":"completed"}}),
+    ])], None).await;
+    let store = http.store();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let engine = engine(
+        &http,
+        store.clone(),
+        Effect {
+            calls: calls.clone(),
+            completed: None,
+        },
+    )
+    .await;
+    let (_stop, cancel) = watch::channel(false);
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.run_embedded(
+            None,
+            vec![Item::user_text("validate completed native output")],
+            cancel,
+            tokio::sync::mpsc::unbounded_channel().1,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    let EngineError::BlockedAction(failure) = error else {
+        panic!("lost block: {error:?}");
+    };
+    assert!(matches!(
+        failure.primary(),
+        EngineError::Transport(TransportError::IncompleteOutputIndices { index: 0 })
+    ));
+    let block = failure.block().clone();
+    assert_eq!(block.reason, InferenceBlockReason::ContinuityUnproven);
+    assert_eq!(
+        summary(&store, &block.request).terminal,
+        Some(ResponseTerminal::Completed)
+    );
+    assert_eq!(
+        summary(&store, &block.request).end,
+        ResponseEnd::ProviderTerminal
+    );
+    assert_eq!(
+        store.provider_response_state(&block.request).unwrap(),
+        Some(ProviderResponseState::Failed)
+    );
+    assert!(
+        store
+            .items(&block.request)
+            .unwrap()
+            .iter()
+            .all(|item| item.0.get("gemini_step").is_none())
+    );
+    assert!(store.claims_on(&block.request).unwrap().is_empty());
+    assert!(
+        store
+            .reserve_automatic_retry(&identity(), &block)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(http.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    drop(engine);
+    drop(store);
+    let reopened = http.store();
+    assert_eq!(
+        reopened.provider_response_state(&block.request).unwrap(),
+        Some(ProviderResponseState::Failed)
+    );
+    assert_eq!(
+        reopened.embedded_inference_state(&identity()).unwrap(),
+        HostInferenceState::Blocked { block }
+    );
+}

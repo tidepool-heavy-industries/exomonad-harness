@@ -180,6 +180,9 @@ mod inference_gate_tests;
 #[cfg(test)]
 #[path = "engine/recovery_tests.rs"]
 mod recovery_tests;
+#[cfg(test)]
+#[path = "engine/terminal_disposition_tests.rs"]
+mod terminal_disposition_tests;
 
 #[cfg(test)]
 #[path = "engine/completion_tests.rs"]
