@@ -398,7 +398,9 @@ impl ResponsesRoute {
     pub const fn tool_encoding_profile(self) -> ToolEncodingProfile {
         match self {
             Self::ChatGptPlan => ToolEncodingProfile::Native,
-            Self::DeepSeek | Self::GeminiInteractions => ToolEncodingProfile::FunctionOnlyExplicitDelivery,
+            Self::DeepSeek | Self::GeminiInteractions => {
+                ToolEncodingProfile::FunctionOnlyExplicitDelivery
+            }
         }
     }
     /// The implemented wire profile, independent of requested model spelling.

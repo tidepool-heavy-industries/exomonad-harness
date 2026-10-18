@@ -442,6 +442,9 @@ fn set_overlay(
     selector: &ContextTextSelector,
     text: &str,
 ) -> Result<()> {
+    if occurrence.item.0.get("gemini_step").is_some() {
+        return Err(ContextError::NativeEdit.into());
+    }
     let original = text_body(&occurrence.item, selector).ok_or(ContextError::InvalidReference)?;
     occurrence
         .overlays
@@ -718,7 +721,9 @@ fn visible_texts(
             let Some(text) = text_body(&projected, &selector) else {
                 continue;
             };
-            let editable = if selector == ContextTextSelector::ToolResultText {
+            let editable = if occurrence.item.0.get("gemini_step").is_some() {
+                false
+            } else if selector == ContextTextSelector::ToolResultText {
                 output_editable(c, owners.get(&occurrence.origin).copied(), occurrence)?
             } else if matches!(selector, ContextTextSelector::ReasoningText { .. }) {
                 reasoning_editable.contains(&occurrence.origin)
@@ -801,7 +806,8 @@ fn encrypted_payload(value: &serde_json::Value) -> bool {
 }
 
 fn opaque(item: &Item) -> bool {
-    item.0.get("gemini_step").is_some() || encrypted_payload(&item.0)
+    item.0.get("gemini_step").is_some()
+        || encrypted_payload(&item.0)
         || !matches!(
             item.0["type"].as_str(),
             Some(

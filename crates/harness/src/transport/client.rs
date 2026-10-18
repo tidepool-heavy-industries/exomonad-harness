@@ -25,10 +25,19 @@ pub(crate) fn normalize_for_dispatch(
     request: &ResponsesRequest,
     contract: (ResponsesRoute, ResponsesProtocol),
 ) -> Result<NormalizedProviderBody, TransportError> {
+    if (contract.0 == ResponsesRoute::GeminiInteractions)
+        != (contract.1 == ResponsesProtocol::Interactions)
+    {
+        return Err(TransportError::InvalidAdmission);
+    }
     let bytes = match contract.0 {
         // Keep the existing struct serializer and field order byte-for-byte.
         ResponsesRoute::ChatGptPlan => serde_json::to_vec(&normalized_request(request)?),
-        ResponsesRoute::GeminiInteractions => serde_json::to_vec(&super::interactions::request(request, super::InferenceLimits::gemini_default(), &vec![false; request.input.len()])?),
+        ResponsesRoute::GeminiInteractions => serde_json::to_vec(&super::interactions::request(
+            request,
+            super::InferenceLimits::gemini_default(),
+            &vec![false; request.input.len()],
+        )?),
         ResponsesRoute::DeepSeek => serde_json::to_vec(&deepseek_request(
             request,
             super::InferenceLimits::deepseek_default(),
@@ -44,6 +53,12 @@ pub(crate) fn normalize_for_selection(
     selection: &super::PreparedTransportSelection,
     authored: &[bool],
 ) -> Result<NormalizedProviderBody, TransportError> {
+    let contract = selection.response_contract();
+    if (contract.0 == ResponsesRoute::GeminiInteractions)
+        != (contract.1 == ResponsesProtocol::Interactions)
+    {
+        return Err(TransportError::InvalidAdmission);
+    }
     if let Some(admission) = selection.native_admission() {
         let contract = admission.contract();
         contract.validate()?;
@@ -54,22 +69,31 @@ pub(crate) fn normalize_for_selection(
         }
         let mut body = match contract.route {
             ResponsesRoute::DeepSeek => deepseek_request(request, contract.limits, authored)?,
-            ResponsesRoute::GeminiInteractions => super::interactions::request(request, contract.limits, authored)?,
+            ResponsesRoute::GeminiInteractions => {
+                super::interactions::request(request, contract.limits, authored)?
+            }
             ResponsesRoute::ChatGptPlan => serde_json::to_value(normalized_request(request)?)
                 .map_err(|_| TransportError::InvalidAdmission)?,
         };
         if let Some(limit) = contract.limits.max_output_tokens {
             if contract.route == ResponsesRoute::GeminiInteractions {
                 body["generation_config"]["max_output_tokens"] = Value::from(limit);
-            } else { body["max_output_tokens"] = Value::from(limit); }
+            } else {
+                body["max_output_tokens"] = Value::from(limit);
+            }
         }
         return serde_json::to_vec(&body)
             .map(NormalizedProviderBody)
             .map_err(|_| TransportError::InvalidAdmission);
     }
     if selection.response_contract().0 == ResponsesRoute::GeminiInteractions {
-        return serde_json::to_vec(&super::interactions::request(request, super::InferenceLimits::gemini_default(), authored)?)
-            .map(NormalizedProviderBody).map_err(|_| TransportError::InvalidAdmission);
+        return serde_json::to_vec(&super::interactions::request(
+            request,
+            super::InferenceLimits::gemini_default(),
+            authored,
+        )?)
+        .map(NormalizedProviderBody)
+        .map_err(|_| TransportError::InvalidAdmission);
     }
     if selection.response_contract().0 == ResponsesRoute::DeepSeek {
         return serde_json::to_vec(&deepseek_request(
@@ -83,7 +107,8 @@ pub(crate) fn normalize_for_selection(
     normalize_for_dispatch(request, selection.response_contract())
 }
 
-pub const GEMINI_INTERACTIONS_ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/interactions";
+pub const GEMINI_INTERACTIONS_ENDPOINT: &str =
+    "https://generativelanguage.googleapis.com/v1beta/interactions";
 
 pub const DEEPSEEK_ENDPOINT: &str = "https://api.deepseek.com/responses";
 
@@ -170,8 +195,14 @@ fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, Tra
             "empty cache diagnostic comparison response id".into(),
         ));
     }
-    if request.input.iter().any(|item| item.0.get("gemini_step").is_some()) {
-        return Err(TransportError::UnsupportedSemantics(super::UnsupportedSemantics::InputItem));
+    if request
+        .input
+        .iter()
+        .any(|item| item.0.get("gemini_step").is_some())
+    {
+        return Err(TransportError::UnsupportedSemantics(
+            super::UnsupportedSemantics::InputItem,
+        ));
     }
     request.tools.strict_tools()?;
     if request.input.iter().any(|item| item.0["role"] == "system") {
@@ -254,8 +285,14 @@ fn deepseek_request(
     if request.prompt_cache_comparison.is_some() {
         return Err(refuse(Unsupported::CacheComparison));
     }
-    if request.input.iter().any(|item| item.0.get("gemini_step").is_some()) {
-        return Err(TransportError::UnsupportedSemantics(super::UnsupportedSemantics::InputItem));
+    if request
+        .input
+        .iter()
+        .any(|item| item.0.get("gemini_step").is_some())
+    {
+        return Err(TransportError::UnsupportedSemantics(
+            super::UnsupportedSemantics::InputItem,
+        ));
     }
     request.tools.strict_tools()?;
     if request.tools.has_duplicate_names() {
@@ -486,10 +523,12 @@ fn native_http_request(
 ) -> reqwest::RequestBuilder {
     match contract.route {
         ResponsesRoute::ChatGptPlan => http_request(http, request, body, token),
-        ResponsesRoute::GeminiInteractions => http.post(&contract.endpoint)
+        ResponsesRoute::GeminiInteractions => http
+            .post(&contract.endpoint)
             .header("x-goog-api-key", token)
             .header(reqwest::header::ACCEPT, "text/event-stream")
-            .header(reqwest::header::CONTENT_TYPE, "application/json").body(body),
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body),
         ResponsesRoute::DeepSeek => http
             .post(&contract.endpoint)
             .bearer_auth(token)
@@ -515,7 +554,9 @@ pub(super) fn http_client_with_limits(
         .redirect(reqwest::redirect::Policy::none());
     let builder = match route {
         ResponsesRoute::ChatGptPlan => builder,
-        ResponsesRoute::DeepSeek => builder.retry(reqwest::retry::never()),
+        ResponsesRoute::DeepSeek | ResponsesRoute::GeminiInteractions => {
+            builder.retry(reqwest::retry::never())
+        }
     };
     builder
         .build()
@@ -720,7 +761,15 @@ pub(super) async fn execute<A: Auth + Clone + 'static>(
         let diagnostic = super::http_error::read(response, &token, "").await;
         return Err(TransportError::Http { status, diagnostic });
     }
-    read_response_observed(response, sink, &token, "", &mut observation, admission.contract().route).await
+    read_response_observed(
+        response,
+        sink,
+        &token,
+        "",
+        &mut observation,
+        admission.contract().route,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -732,7 +781,15 @@ async fn read_response(
     publisher: Option<tokio::sync::oneshot::Sender<super::TransportObservation>>,
 ) -> Result<ResponsesTurn, TransportError> {
     let mut observation = ObservationGuard::new(publisher, None);
-    read_response_observed(response, sink, token, account, &mut observation, ResponsesRoute::ChatGptPlan).await
+    read_response_observed(
+        response,
+        sink,
+        token,
+        account,
+        &mut observation,
+        ResponsesRoute::ChatGptPlan,
+    )
+    .await
 }
 
 async fn read_response_observed(
@@ -790,12 +847,13 @@ async fn read_response_observed(
                     .summary()
                     .sse_event(super::EventKind::from_provider(Some(name)));
             }
-            match assembly.accept(&frame.data, token, account, observation.summary())
-            {
+            match assembly.accept(&frame.data, token, account, observation.summary()) {
                 Ok(events) => {
                     for event in events {
                         observation.visible_event(&event);
-                        if let Some(sender) = &sink { let _ = sender.send(event).await; }
+                        if let Some(sender) = &sink {
+                            let _ = sender.send(event).await;
+                        }
                     }
                 }
                 Err(error) => {
@@ -820,7 +878,10 @@ async fn read_response_observed(
 }
 
 // Both protocols share framing, observation, admission and cancellation owners.
-enum ProviderAssembly { Responses(ResponseAssembly), Interactions(super::interactions::Assembly) }
+enum ProviderAssembly {
+    Responses(ResponseAssembly),
+    Interactions(super::interactions::Assembly),
+}
 impl ProviderAssembly {
     fn new(route: ResponsesRoute) -> Self {
         match route {
@@ -828,14 +889,32 @@ impl ProviderAssembly {
             _ => Self::Responses(Default::default()),
         }
     }
-    fn accept(&mut self, data: &str, token: &str, account: &str, observation: &mut super::TransportObservation) -> Result<Vec<StreamEvent>, TransportError> {
+    fn accept(
+        &mut self,
+        data: &str,
+        token: &str,
+        account: &str,
+        observation: &mut super::TransportObservation,
+    ) -> Result<Vec<StreamEvent>, TransportError> {
         match self {
-            Self::Responses(assembly) => assembly.accept_observed(data, token, account, Some(observation)).map(|event| event.into_iter().collect()),
+            Self::Responses(assembly) => assembly
+                .accept_observed(data, token, account, Some(observation))
+                .map(|event| event.into_iter().collect()),
             Self::Interactions(assembly) => assembly.accept(data, observation),
         }
     }
-    fn is_complete(&self) -> bool { match self { Self::Responses(a) => a.is_complete(), Self::Interactions(a) => a.is_complete() } }
-    fn finish(self) -> Result<ResponsesTurn, TransportError> { match self { Self::Responses(a) => a.finish(), Self::Interactions(a) => a.finish() } }
+    fn is_complete(&self) -> bool {
+        match self {
+            Self::Responses(a) => a.is_complete(),
+            Self::Interactions(a) => a.is_complete(),
+        }
+    }
+    fn finish(self) -> Result<ResponsesTurn, TransportError> {
+        match self {
+            Self::Responses(a) => a.finish(),
+            Self::Interactions(a) => a.finish(),
+        }
+    }
 }
 
 #[cfg(test)]

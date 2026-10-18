@@ -22,8 +22,12 @@ impl InferenceLimits {
         }
     }
     pub const fn gemini_default() -> Self {
-        Self { max_output_tokens: Some(65_536), connect_timeout_secs: 15,
-            total_timeout_secs: 300, max_inflight: 4 }
+        Self {
+            max_output_tokens: Some(65_536),
+            connect_timeout_secs: 15,
+            total_timeout_secs: 300,
+            max_inflight: 4,
+        }
     }
     pub const fn chatgpt_default() -> Self {
         Self {
@@ -76,7 +80,9 @@ pub struct NativeTransportContract {
 impl NativeTransportContract {
     pub fn validate(&self) -> Result<(), TransportError> {
         self.limits.validate(self.route)?;
-        if (self.route == ResponsesRoute::GeminiInteractions) != (self.protocol == ResponsesProtocol::Interactions) {
+        if (self.route == ResponsesRoute::GeminiInteractions)
+            != (self.protocol == ResponsesProtocol::Interactions)
+        {
             return Err(TransportError::InvalidAdmission);
         }
         let expected = match self.route {
@@ -85,15 +91,26 @@ impl NativeTransportContract {
             ResponsesRoute::GeminiInteractions => super::client::GEMINI_INTERACTIONS_ENDPOINT,
         };
         if self.endpoint != expected
-            && !(matches!(self.route, ResponsesRoute::DeepSeek | ResponsesRoute::GeminiInteractions)
-                && numeric_loopback_endpoint(&self.endpoint, if self.route == ResponsesRoute::GeminiInteractions { "/v1beta/interactions" } else { "/responses" }))
+            && !(matches!(
+                self.route,
+                ResponsesRoute::DeepSeek | ResponsesRoute::GeminiInteractions
+            ) && numeric_loopback_endpoint(
+                &self.endpoint,
+                if self.route == ResponsesRoute::GeminiInteractions {
+                    "/v1beta/interactions"
+                } else {
+                    "/responses"
+                },
+            ))
         {
             return Err(TransportError::InvalidAdmission);
         }
         let path = match &self.credential {
             CredentialReference::Env { name } => {
-                if !matches!(self.route, ResponsesRoute::DeepSeek | ResponsesRoute::GeminiInteractions)
-                    || name.is_empty()
+                if !matches!(
+                    self.route,
+                    ResponsesRoute::DeepSeek | ResponsesRoute::GeminiInteractions
+                ) || name.is_empty()
                     || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
                 {
                     return Err(TransportError::InvalidAdmission);

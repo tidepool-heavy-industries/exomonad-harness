@@ -294,6 +294,9 @@ async fn credential_worker_failure_preserves_route_error_and_observation_without
             .await
             .unwrap_err();
         match route {
+            ResponsesRoute::GeminiInteractions => {
+                unreachable!("this credential fixture selects Responses providers")
+            }
             ResponsesRoute::ChatGptPlan => assert!(matches!(error, TransportError::Authentication)),
             ResponsesRoute::DeepSeek => assert!(matches!(
                 error,
