@@ -21,6 +21,10 @@ impl InferenceLimits {
             max_inflight: 4,
         }
     }
+    pub const fn gemini_default() -> Self {
+        Self { max_output_tokens: Some(65_536), connect_timeout_secs: 15,
+            total_timeout_secs: 300, max_inflight: 4 }
+    }
     pub const fn chatgpt_default() -> Self {
         Self {
             max_output_tokens: None,
@@ -72,19 +76,23 @@ pub struct NativeTransportContract {
 impl NativeTransportContract {
     pub fn validate(&self) -> Result<(), TransportError> {
         self.limits.validate(self.route)?;
+        if (self.route == ResponsesRoute::GeminiInteractions) != (self.protocol == ResponsesProtocol::Interactions) {
+            return Err(TransportError::InvalidAdmission);
+        }
         let expected = match self.route {
             ResponsesRoute::ChatGptPlan => super::client::CHATGPT_PLAN_ENDPOINT,
             ResponsesRoute::DeepSeek => super::client::DEEPSEEK_ENDPOINT,
+            ResponsesRoute::GeminiInteractions => super::client::GEMINI_INTERACTIONS_ENDPOINT,
         };
         if self.endpoint != expected
-            && !(self.route == ResponsesRoute::DeepSeek
-                && numeric_loopback_endpoint(&self.endpoint))
+            && !(matches!(self.route, ResponsesRoute::DeepSeek | ResponsesRoute::GeminiInteractions)
+                && numeric_loopback_endpoint(&self.endpoint, if self.route == ResponsesRoute::GeminiInteractions { "/v1beta/interactions" } else { "/responses" }))
         {
             return Err(TransportError::InvalidAdmission);
         }
         let path = match &self.credential {
             CredentialReference::Env { name } => {
-                if self.route != ResponsesRoute::DeepSeek
+                if !matches!(self.route, ResponsesRoute::DeepSeek | ResponsesRoute::GeminiInteractions)
                     || name.is_empty()
                     || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
                 {
@@ -148,7 +156,7 @@ impl NativeTransportAdmission {
 // An explicitly selected local provider can exercise the same HTTP contract.
 // No hostname resolution, credential-bearing URL, redirect or endpoint rebinding
 // is admitted; the exact canonical URL remains part of durable equality.
-fn numeric_loopback_endpoint(endpoint: &str) -> bool {
+fn numeric_loopback_endpoint(endpoint: &str, path: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(endpoint) else {
         return false;
     };
@@ -165,7 +173,7 @@ fn numeric_loopback_endpoint(endpoint: &str) -> bool {
             .is_ok_and(|host| host.is_loopback())
         && url.username().is_empty()
         && url.password().is_none()
-        && url.path() == "/responses"
+        && url.path() == path
         && url.query().is_none()
         && url.fragment().is_none()
 }

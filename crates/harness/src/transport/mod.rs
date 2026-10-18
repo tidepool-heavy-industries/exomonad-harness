@@ -4,6 +4,7 @@
 //! Explicit ChatGPT-plan and DeepSeek credentials under Standard Responses.
 
 mod admission;
+mod interactions;
 pub use admission::{
     CredentialReference, InferenceLimits, NativeTransportAdmission, NativeTransportContract,
 };
@@ -384,19 +385,20 @@ pub enum ResponsesRoute {
     #[default]
     ChatGptPlan,
     DeepSeek,
+    GeminiInteractions,
 }
 
 impl ResponsesRoute {
     pub const fn response_finality(self) -> ResponseFinality {
         match self {
             Self::ChatGptPlan => ResponseFinality::ExplicitPhase,
-            Self::DeepSeek => ResponseFinality::CompletedAssistantText,
+            Self::DeepSeek | Self::GeminiInteractions => ResponseFinality::CompletedAssistantText,
         }
     }
     pub const fn tool_encoding_profile(self) -> ToolEncodingProfile {
         match self {
             Self::ChatGptPlan => ToolEncodingProfile::Native,
-            Self::DeepSeek => ToolEncodingProfile::FunctionOnlyExplicitDelivery,
+            Self::DeepSeek | Self::GeminiInteractions => ToolEncodingProfile::FunctionOnlyExplicitDelivery,
         }
     }
     /// The implemented wire profile, independent of requested model spelling.
@@ -418,6 +420,7 @@ pub trait Auth: Send + Sync {
 pub enum ResponsesProtocol {
     #[default]
     Standard,
+    Interactions,
 }
 
 pub struct ResponsesClient<A: Auth> {

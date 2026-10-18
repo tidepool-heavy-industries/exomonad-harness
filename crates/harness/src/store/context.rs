@@ -801,7 +801,7 @@ fn encrypted_payload(value: &serde_json::Value) -> bool {
 }
 
 fn opaque(item: &Item) -> bool {
-    encrypted_payload(&item.0)
+    item.0.get("gemini_step").is_some() || encrypted_payload(&item.0)
         || !matches!(
             item.0["type"].as_str(),
             Some(

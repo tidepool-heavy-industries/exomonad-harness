@@ -4,3 +4,6 @@ pub use chatgpt::ChatGptPlanAuth;
 
 pub mod deepseek;
 pub use deepseek::DeepSeekAuth;
+
+pub mod gemini;
+pub use gemini::GeminiAuth;

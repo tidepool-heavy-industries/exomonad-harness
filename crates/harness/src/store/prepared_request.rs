@@ -162,7 +162,7 @@ impl Store {
                         && !item
                             .0
                             .as_object()
-                            .is_some_and(|object| object.contains_key("encrypted_content")))
+                            .is_some_and(|object| object.contains_key("encrypted_content") || object.contains_key("gemini_step")))
                     && !(purpose == ProviderRequestPurpose::ServerCompaction
                         && item.0["type"] == "compaction_trigger")
                 {
@@ -176,7 +176,7 @@ impl Store {
         // above; role spelling and absent provider envelopes prove neither.
         let hook_notes = match contract.0 {
             ResponsesRoute::ChatGptPlan => std::collections::HashSet::new(),
-            ResponsesRoute::DeepSeek => self.model_tool_note_origins(occurrences)?,
+            ResponsesRoute::DeepSeek | ResponsesRoute::GeminiInteractions => self.model_tool_note_origins(occurrences)?,
         };
         let authored = occurrences
             .iter()

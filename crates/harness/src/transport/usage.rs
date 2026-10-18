@@ -26,6 +26,22 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Gemini reports visible output and thoughts separately. The common output
+    /// counter includes both; an absent component leaves that total unknown.
+    pub fn from_interaction_usage(response: &Value) -> Self {
+        let Some(usage) = response.get("usage") else { return Self::default(); };
+        let visible = usage.get("total_output_tokens").and_then(Value::as_u64);
+        let thought = usage.get("total_thought_tokens").and_then(Value::as_u64);
+        Self {
+            input_tokens: usage.get("total_input_tokens").and_then(Value::as_u64),
+            output_tokens: visible.zip(thought).and_then(|(a,b)| a.checked_add(b)),
+            cached_tokens: usage.get("total_cached_tokens").and_then(Value::as_u64),
+            reasoning_tokens: thought,
+            raw: RawUsage::Observed(usage.clone()),
+            ..Self::default()
+        }
+    }
+
     pub fn has_reported_totals(&self) -> bool {
         self.input_tokens.is_some() && self.output_tokens.is_some()
     }

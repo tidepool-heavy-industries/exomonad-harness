@@ -40,12 +40,18 @@ impl Auth for DeepSeekAuth {
         Ok(self.admission.clone())
     }
     fn access(&self) -> Result<String, TransportError> {
+        read_api_key(&self.admission.contract().credential, ResponsesRoute::DeepSeek)
+    }
+}
+
+/// Shared credential-source validation for API-key providers; no fallback.
+pub(super) fn read_api_key(credential: &CredentialReference, route: ResponsesRoute) -> Result<String, TransportError> {
         use super::super::CredentialFailure as Failure;
         let fail = |reason| TransportError::CredentialUnavailable {
-            route: ResponsesRoute::DeepSeek,
+            route,
             reason,
         };
-        let secret = match &self.admission.contract().credential {
+        let secret = match credential {
             CredentialReference::Env { name } => std::env::var(name).map_err(|error| {
                 fail(match error {
                     std::env::VarError::NotPresent => Failure::Missing,
@@ -93,7 +99,6 @@ impl Auth for DeepSeekAuth {
             return Err(fail(Failure::Invalid));
         }
         Ok(key.to_owned())
-    }
 }
 
 #[cfg(test)]
