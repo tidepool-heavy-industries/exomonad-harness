@@ -1,10 +1,26 @@
 # exomonad-harness
 
-A standalone Rust harness for GPT-6 over the OpenAI Responses API, with
+A standalone Rust harness with native OpenAI, DeepSeek and Gemini transports,
 asynchronous tools, durable conversation history and an authenticated web view.
 The standalone demo manages its own agent tree. An embedding supplies admitted
 actor capabilities and tools while retaining lifecycle authority; the harness
 has no Tidepool dependency.
+
+The Gemini transport supports only `gemini-4-argon` through the
+[Interactions API](https://ai.google.dev/api/interactions-api), with `store=false`
+and explicit local history. Admission binds the endpoint, credential reference
+and concurrency limits. Effort is `low`, `medium` or `high`; sampler controls,
+inline stop protocols and native structured decoding are not exposed. Typed
+bounded calls continue to use the existing `finalize` tool.
+
+Native steps retain their opaque thought signatures and sibling order through
+Store reopen and replay. Their visible projections cannot be edited or moved
+to another provider. Function results replay in call issuance order even when
+callbacks finish out of order. Unsupported nontext model output is refused.
+Usage retains the raw provider record and optional normalized input, cached,
+output and reasoning counters; normalized output includes reasoning tokens.
+Controlled HTTP fixtures exercise this contract without credentials. Live
+Argon behavior and cache performance require separate qualification.
 
 Start at `NEXT.md` and the [implementation handoff](docs/embedding-ready-handoff.md).
 The [embedded-host contract](docs/embedded-host-prd.md) defines the Exomonad target;
