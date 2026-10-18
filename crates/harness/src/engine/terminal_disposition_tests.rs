@@ -195,7 +195,14 @@ impl NativeHttp {
 impl Drop for NativeHttp {
     fn drop(&mut self) {
         self.server.abort();
-        let _ = std::fs::remove_dir_all(&self.directory);
+        if std::thread::panicking() {
+            eprintln!(
+                "failed native terminal Store retained at {}",
+                self.directory.display()
+            );
+        } else {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
     }
 }
 async fn check<A: Auth + Clone + 'static>(
@@ -270,6 +277,9 @@ async fn check<A: Auth + Clone + 'static>(
             .await
             .unwrap_err()
     };
+    eprintln!(
+        "native terminal assertion: gemini={gemini} compaction={compaction} end={end:?} actual={error:?}"
+    );
     let state = match end {
         End::Eof | End::ReadFailure => {
             let cause = if matches!(end, End::Eof) {
