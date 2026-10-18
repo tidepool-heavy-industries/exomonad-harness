@@ -3,7 +3,7 @@
 use super::*;
 use crate::embedding::{
     AdmissionGuard, Conversation, EmbeddedError, HostActor, HostControl, HostControlError,
-    HostIdentity, ToolSurface,
+    HostIdentity, HostInferenceState, InferenceBlockReason, ToolSurface,
 };
 use crate::store::{ProviderRequestPurpose, ProviderResponseState};
 use crate::transport::{
@@ -271,25 +271,28 @@ async fn check<A: Auth + Clone + 'static>(
     .await
     .unwrap();
     let actor = conversation.identity().actor.clone();
-    let engine = Engine::<A, _, _>::with_transport(
-        client,
-        store.clone(),
-        Arc::new(JobScheduler::new(1).unwrap()),
-        conversation.provider(),
-        EngineConfig {
-            instructions: "native terminal disposition".into(),
-            tools: vec![],
-            model: if gemini {
-                "gemini-4-argon"
-            } else {
-                "deepseek-v4-pro"
-            }
-            .into(),
-            effort: Effort::Low,
-            session_id: "native-terminal".into(),
-            agent: actor.clone(),
-        },
-    );
+    let identity = conversation.identity().clone();
+    let engine = conversation
+        .engine::<A, _>(
+            client,
+            Arc::new(JobScheduler::new(1).unwrap()),
+            EngineConfig {
+                instructions: "native terminal disposition".into(),
+                tools: vec![],
+                model: if gemini {
+                    "gemini-4-argon"
+                } else {
+                    "deepseek-v4-pro"
+                }
+                .into(),
+                effort: Effort::Low,
+                session_id: "native-terminal".into(),
+                agent: actor.clone(),
+            },
+            std::num::NonZeroU64::new(1_000_000).unwrap(),
+        )
+        .unwrap();
+    drop(conversation);
     let (_cancel, cancellation) = watch::channel(false);
     let error = if compaction {
         let source = RequestId("source".into());
@@ -324,7 +327,7 @@ async fn check<A: Auth + Clone + 'static>(
             .unwrap_err()
     } else {
         engine
-            .run(
+            .run_embedded(
                 None,
                 vec![Item::user_text("retain the native prefix")],
                 cancellation,
@@ -340,6 +343,49 @@ async fn check<A: Auth + Clone + 'static>(
         http.authenticated_request.load(Ordering::SeqCst),
         "terminal matrix did not reach authenticated HTTP: gemini={gemini} compaction={compaction} end={end:?} actual={error:?}"
     );
+    let (primary, expected_block) = if compaction {
+        (&error, None)
+    } else {
+        let EngineError::BlockedAction(failure) = &error else {
+            panic!("missing bound terminal block: gemini={gemini} end={end:?} actual={error:?}");
+        };
+        let expected_reason = match end {
+            End::Eof | End::ReadFailure => InferenceBlockReason::StreamInterrupted {
+                cause: if matches!(end, End::Eof) {
+                    StreamInterruption::MissingCompletion
+                } else {
+                    StreamInterruption::ReadFailed
+                },
+            },
+            End::Incomplete => InferenceBlockReason::ResponseIncomplete {
+                response_id: "native".into(),
+                reason: if gemini {
+                    None
+                } else {
+                    Some(IncompleteReason::ContentFilter)
+                },
+            },
+            End::Failed | End::Cancelled => InferenceBlockReason::ProviderStreamFailure {
+                event: if !gemini {
+                    ProviderStreamFailureEvent::ResponseFailed
+                } else if matches!(end, End::Cancelled) {
+                    ProviderStreamFailureEvent::InteractionCancelled
+                } else {
+                    ProviderStreamFailureEvent::InteractionFailed
+                },
+                diagnostic: None,
+            },
+            End::Malformed | End::InvalidComplete => InferenceBlockReason::ContinuityUnproven,
+        };
+        assert_eq!(failure.block().reason, expected_reason);
+        assert_eq!(
+            store.embedded_inference_state(&identity).unwrap(),
+            HostInferenceState::Blocked {
+                block: failure.block().clone()
+            }
+        );
+        (failure.primary(), Some(failure.block().clone()))
+    };
     let state = match end {
         End::Eof | End::ReadFailure => {
             let cause = if matches!(end, End::Eof) {
@@ -349,18 +395,18 @@ async fn check<A: Auth + Clone + 'static>(
             };
             if compaction {
                 assert!(
-                    matches!(error,EngineError::Transport(TransportError::IncompleteResponse(actual)) if actual == cause)
+                    matches!(primary,EngineError::Transport(TransportError::IncompleteResponse(actual)) if *actual == cause)
                 );
             } else {
                 assert!(
-                    matches!(error,EngineError::InterruptedModelRound {cause:actual,..} if actual == cause)
+                    matches!(primary,EngineError::InterruptedModelRound {cause:actual,..} if *actual == cause)
                 );
             }
             ProviderResponseState::Interrupted
         }
         End::Incomplete => {
             assert!(
-                matches!(error,EngineError::Transport(TransportError::ResponseIncomplete {ref response_id,reason}) if response_id == "native" && reason == if gemini {None} else {Some(IncompleteReason::ContentFilter)})
+                matches!(primary,EngineError::Transport(TransportError::ResponseIncomplete {response_id,reason}) if response_id == "native" && *reason == if gemini {None} else {Some(IncompleteReason::ContentFilter)})
             );
             ProviderResponseState::Failed
         }
@@ -373,13 +419,13 @@ async fn check<A: Auth + Clone + 'static>(
                 ProviderStreamFailureEvent::InteractionFailed
             };
             assert!(
-                matches!(error,EngineError::Transport(TransportError::ProviderStreamFailure {event,diagnostic:None}) if event == expected)
+                matches!(primary,EngineError::Transport(TransportError::ProviderStreamFailure {event,diagnostic:None}) if *event == expected)
             );
             ProviderResponseState::Failed
         }
         End::Malformed => {
             assert!(matches!(
-                error,
+                primary,
                 EngineError::Transport(
                     TransportError::Stream(_) | TransportError::MissingOutputIndex
                 )
@@ -388,7 +434,7 @@ async fn check<A: Auth + Clone + 'static>(
         }
         End::InvalidComplete => {
             assert!(matches!(
-                error,
+                primary,
                 EngineError::Transport(TransportError::IncompleteOutputIndices { index: 1 })
             ));
             ProviderResponseState::Failed
@@ -449,6 +495,12 @@ async fn check<A: Auth + Clone + 'static>(
         Some(state)
     );
     assert!(reopened.claims_on(&request).unwrap().is_empty());
+    if let Some(block) = expected_block {
+        assert_eq!(
+            reopened.embedded_inference_state(&identity).unwrap(),
+            HostInferenceState::Blocked { block }
+        );
+    }
 }
 
 #[tokio::test]
