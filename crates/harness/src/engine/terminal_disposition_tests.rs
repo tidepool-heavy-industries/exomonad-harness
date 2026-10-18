@@ -270,6 +270,7 @@ async fn check<A: Auth + Clone + 'static>(
     )
     .await
     .unwrap();
+    let actor = conversation.identity().actor.clone();
     let engine = Engine::<A, _, _>::with_transport(
         client,
         store.clone(),
@@ -286,16 +287,16 @@ async fn check<A: Auth + Clone + 'static>(
             .into(),
             effort: Effort::Low,
             session_id: "native-terminal".into(),
-            agent: AgentPath("/root".into()),
+            agent: actor.clone(),
         },
     );
     let (_cancel, cancellation) = watch::channel(false);
     let error = if compaction {
         let source = RequestId("source".into());
         let child = RequestId("compactor".into());
-        store.create_request(&source, None, "/root").unwrap();
+        store.create_request(&source, None, &actor.0).unwrap();
         store
-            .create_request(&child, Some(&source), "/root")
+            .create_request(&child, Some(&source), &actor.0)
             .unwrap();
         let prepared = store
             .prepare_provider_request(
