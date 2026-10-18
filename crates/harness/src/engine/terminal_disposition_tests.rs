@@ -259,7 +259,7 @@ async fn check<A: Auth + Clone + 'static>(
         Arc::new(LocalHost {
             identity: HostIdentity {
                 run: "native-terminal".into(),
-                actor: AgentPath("/test".into()),
+                actor: AgentPath("/root".into()),
                 incarnation: "one".into(),
             },
             surface: Arc::new(
@@ -286,16 +286,16 @@ async fn check<A: Auth + Clone + 'static>(
             .into(),
             effort: Effort::Low,
             session_id: "native-terminal".into(),
-            agent: AgentPath("/test".into()),
+            agent: AgentPath("/root".into()),
         },
     );
     let (_cancel, cancellation) = watch::channel(false);
     let error = if compaction {
         let source = RequestId("source".into());
         let child = RequestId("compactor".into());
-        store.create_request(&source, None, "/test").unwrap();
+        store.create_request(&source, None, "/root").unwrap();
         store
-            .create_request(&child, Some(&source), "/test")
+            .create_request(&child, Some(&source), "/root")
             .unwrap();
         let prepared = store
             .prepare_provider_request(
