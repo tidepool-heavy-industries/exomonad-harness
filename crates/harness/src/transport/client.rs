@@ -923,7 +923,9 @@ impl ProviderAssembly {
     fn new(route: ResponsesRoute) -> Self {
         match route {
             ResponsesRoute::GeminiInteractions => Self::Interactions(Default::default()),
-            _ => Self::Responses(Default::default()),
+            ResponsesRoute::ChatGptPlan | ResponsesRoute::DeepSeek => {
+                Self::Responses(Default::default())
+            }
         }
     }
     fn advance(
