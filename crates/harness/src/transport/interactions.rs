@@ -281,7 +281,7 @@ impl Assembly {
         token: &str,
         account: &str,
         observation: &mut super::TransportObservation,
-    ) -> Result<AssemblyAdvance, ProtocolFault> {
+    ) -> Result<AssemblyAdvance<Vec<StreamEvent>>, ProtocolFault> {
         let event: Value = serde_json::from_str(data)
             .map_err(|_| ProtocolFault::Invalid("invalid Interactions SSE JSON"))?;
         if let Some(id) = event["event_id"].as_str() {

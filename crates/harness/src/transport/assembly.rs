@@ -2,7 +2,7 @@
 //! stops are separate facts; neither grants recovery or replay permission.
 use super::{
     HttpDiagnostic, IncompleteReason, ProviderStreamFailureEvent, ResponseTerminal, TransportError,
-    TransportObservation, UnsupportedSemantics, sse::StreamEvent,
+    TransportObservation, UnsupportedSemantics,
 };
 
 #[derive(Debug)]
@@ -86,20 +86,31 @@ impl DeclaredStop {
 }
 
 #[derive(Debug)]
-pub(super) enum AssemblyAdvance {
-    Progress(Vec<StreamEvent>),
+pub(super) enum AssemblyAdvance<Events> {
+    Progress(Events),
     /// The native terminal was recognized. Local item validation is still
     /// required before the reader may issue a successful ResponsesTurn.
-    Complete(Vec<StreamEvent>),
+    Complete(Events),
     Stopped(DeclaredStop),
 }
-impl AssemblyAdvance {
+impl<Events> AssemblyAdvance<Events> {
+    pub(super) fn map_events<Mapped>(
+        self,
+        map: impl FnOnce(Events) -> Mapped,
+    ) -> AssemblyAdvance<Mapped> {
+        match self {
+            Self::Progress(events) => AssemblyAdvance::Progress(map(events)),
+            Self::Complete(events) => AssemblyAdvance::Complete(map(events)),
+            Self::Stopped(stop) => AssemblyAdvance::Stopped(stop),
+        }
+    }
+
     /// Compatibility view for the public Responses parser; native readers
     /// instead consume the closed outcome and validate completion immediately.
     pub(super) fn into_events(
         self,
         observation: Option<&mut TransportObservation>,
-    ) -> Result<Vec<StreamEvent>, TransportError> {
+    ) -> Result<Events, TransportError> {
         match self {
             Self::Progress(events) | Self::Complete(events) => Ok(events),
             Self::Stopped(stop) => Err(stop.into_error(observation)),

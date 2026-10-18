@@ -935,7 +935,9 @@ impl ProviderAssembly {
     ) -> Result<NativeAdvance, super::assembly::ProtocolFault> {
         use super::assembly::AssemblyAdvance;
         let advance = match &mut self {
-            Self::Responses(assembly) => assembly.advance(data, token, account, Some(observation)),
+            Self::Responses(assembly) => assembly
+                .advance(data, token, account, Some(observation))
+                .map(|advance| advance.map_events(|event| event.into_iter().collect::<Vec<_>>())),
             Self::Interactions(assembly) => assembly.advance(data, token, account, observation),
         }?;
         match advance {

@@ -85,7 +85,6 @@ impl ResponseAssembly {
         self.advance(data, token, account, observation.as_deref_mut())
             .map_err(ProtocolFault::into_error)?
             .into_events(observation)
-            .map(|events| events.into_iter().next())
     }
 
     pub(super) fn advance(
@@ -94,7 +93,7 @@ impl ResponseAssembly {
         token: &str,
         account: &str,
         mut observation: Option<&mut super::TransportObservation>,
-    ) -> Result<AssemblyAdvance, ProtocolFault> {
+    ) -> Result<AssemblyAdvance<Option<StreamEvent>>, ProtocolFault> {
         let event: Value =
             serde_json::from_str(data).map_err(|_| ProtocolFault::Invalid("invalid SSE JSON"))?;
         if let Some(observation) = observation.as_deref_mut() {
@@ -128,7 +127,7 @@ impl ResponseAssembly {
                     observation.response_created_id = Some(id);
                     observation.metadata_truncated |= truncated;
                 }
-                Ok(AssemblyAdvance::Progress(Vec::new()))
+                Ok(AssemblyAdvance::Progress(None))
             }
             Some("response.output_item.added") => {
                 let item = &event["item"];
@@ -145,7 +144,7 @@ impl ResponseAssembly {
                         }
                     }
                 }
-                Ok(AssemblyAdvance::Progress(Vec::new()))
+                Ok(AssemblyAdvance::Progress(None))
             }
             Some("response.output_item.done") => {
                 let item = event
@@ -170,9 +169,9 @@ impl ResponseAssembly {
                 } else {
                     self.items.insert(output_index, done.item.clone());
                 }
-                Ok(AssemblyAdvance::Progress(vec![StreamEvent::CompletedItem(
+                Ok(AssemblyAdvance::Progress(Some(StreamEvent::CompletedItem(
                     done,
-                )]))
+                ))))
             }
             Some(
                 kind @ ("response.output_text.delta"
@@ -225,9 +224,7 @@ impl ResponseAssembly {
                             )
                             .then(|| self.tool_names.get(item_id).cloned())
                             .flatten(),
-                        })
-                        .into_iter()
-                        .collect(),
+                        }),
                 ))
             }
             Some("response.completed") => {
@@ -296,7 +293,7 @@ impl ResponseAssembly {
                     "provider completion diagnostics"
                 );
                 self.completed = Some((id.to_owned(), Usage::from_response_usage(response)));
-                Ok(AssemblyAdvance::Complete(Vec::new()))
+                Ok(AssemblyAdvance::Complete(None))
             }
             Some("response.incomplete") => {
                 let response = event
@@ -362,7 +359,7 @@ impl ResponseAssembly {
                     ),
                 }))
             }
-            _ => Ok(AssemblyAdvance::Progress(Vec::new())),
+            _ => Ok(AssemblyAdvance::Progress(None)),
         }
     }
 
