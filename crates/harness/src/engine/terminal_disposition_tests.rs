@@ -8,7 +8,8 @@ use crate::transport::{
     ResponsesProtocol, ResponsesRoute, StreamInterruption, TransportObservation,
     auth::{DeepSeekAuth, GeminiAuth},
 };
-use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf};
+use serde_json::Value;
+use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Clone, Copy, Debug)]
@@ -207,7 +208,7 @@ async fn check<A: Auth + Clone + 'static>(
     let store = http.store();
     let client = ResponsesClient::new(auth);
     let selected = client.prepare_submission().unwrap();
-    let engine = Engine::with_transport(
+    let engine = Engine::<A, _, _>::with_transport(
         client,
         store.clone(),
         Arc::new(JobScheduler::new(1).unwrap()),
