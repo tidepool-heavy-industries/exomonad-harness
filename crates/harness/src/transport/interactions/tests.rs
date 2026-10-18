@@ -795,9 +795,13 @@ fn moved_input_and_config_match_previous_wire_construction() {
 #[test]
 fn moved_gemini_body_retains_typed_native_overlay_refusal() {
     let mut request = request_fixture();
-    request.input = vec![Item(
-        json!({"type":"message","role":"user","content":"changed","gemini_step":{"type":"user_input","content":[{"type":"text","text":"original"}]}}),
-    )];
+    let mut native = project(
+        json!({"type":"model_output","content":[{"type":"text","text":"original"}]}),
+        "native-id",
+    )
+    .unwrap();
+    native.0["content"][0]["text"] = "changed".into();
+    request.input = vec![native];
     assert!(matches!(
         normalize(&request, &[false]),
         Err(TransportError::UnsupportedSemantics(
