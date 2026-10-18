@@ -481,6 +481,7 @@ struct BudgetTransport<C> {
     inner: C,
     budget: CellBudget,
     requests: Arc<Mutex<Vec<RequestId>>>,
+    observations: Arc<Mutex<Vec<RequestObservation>>>,
     closed: Arc<AtomicBool>,
     closed_signal: tokio_util::sync::CancellationToken,
     invocation_counts: Arc<Mutex<Counts>>,
@@ -522,6 +523,8 @@ impl<C: ResponsesTransport> ResponsesTransport for BudgetTransport<C> {
             .admit(false)
             .map_err(|reason| TransportError::Stream(format!("budget exhausted: {reason:?}")))?;
         self.invocation_counts.lock().unwrap().requests += 1;
+        let observation = RequestObservation::started(&request);
+        let started = Instant::now();
         let result = tokio::select! {
             result = tokio::time::timeout_at(self.budget.deadline(), self.inner.create(request)) => result,
             _ = self.closed_signal.cancelled() => Ok(Err(TransportError::Stream("invocation closed".into()))),
@@ -530,6 +533,10 @@ impl<C: ResponsesTransport> ResponsesTransport for BudgetTransport<C> {
         let result =
             result.unwrap_or_else(|_| Err(TransportError::Stream("budget deadline".into())));
         let usage = result.as_ref().ok().map(|turn| &turn.usage);
+        self.observations
+            .lock()
+            .unwrap()
+            .push(observation.finished(started.elapsed(), usage));
         self.budget.usage(usage);
         self.invocation_counts.lock().unwrap().record_usage(usage);
         result
@@ -553,6 +560,8 @@ impl<C: ResponsesTransport> ResponsesTransport for BudgetTransport<C> {
             .admit(false)
             .map_err(|reason| TransportError::Stream(format!("budget exhausted: {reason:?}")))?;
         self.invocation_counts.lock().unwrap().requests += 1;
+        let observation = RequestObservation::started(&request);
+        let started = Instant::now();
         let result = tokio::select! {
             result = tokio::time::timeout_at(self.budget.deadline(), self.inner.create_streaming(request, sink)) => result,
             _ = self.closed_signal.cancelled() => Ok(Err(TransportError::Stream("invocation closed".into()))),
@@ -561,6 +570,10 @@ impl<C: ResponsesTransport> ResponsesTransport for BudgetTransport<C> {
         let result =
             result.unwrap_or_else(|_| Err(TransportError::Stream("budget deadline".into())));
         let usage = result.as_ref().ok().map(|turn| &turn.usage);
+        self.observations
+            .lock()
+            .unwrap()
+            .push(observation.finished(started.elapsed(), usage));
         self.budget.usage(usage);
         self.invocation_counts.lock().unwrap().record_usage(usage);
         result
@@ -575,11 +588,52 @@ pub enum Outcome {
     Cancelled,
     Failed(String),
 }
+/// One admitted transport await. `request_id` resolves the Store's retained
+/// transport observation and raw provider usage; counters preserve absence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestObservation {
+    pub request_id: RequestId,
+    pub provider: crate::transport::ResponsesRoute,
+    pub model: String,
+    pub input_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    /// Monotonic elapsed time across the transport await, including stream consumption.
+    pub duration_ms: u64,
+}
+impl RequestObservation {
+    fn started(request: &PreparedProviderRequest) -> Self {
+        Self {
+            request_id: request.request_id().clone(),
+            provider: request.response_contract().0,
+            model: request.request().model.clone(),
+            input_tokens: None,
+            cached_tokens: None,
+            output_tokens: None,
+            reasoning_tokens: None,
+            duration_ms: 0,
+        }
+    }
+    fn finished(mut self, elapsed: Duration, usage: Option<&Usage>) -> Self {
+        self.duration_ms = elapsed.as_millis().try_into().unwrap_or(u64::MAX);
+        if let Some(usage) = usage {
+            self.input_tokens = usage.input_tokens;
+            self.cached_tokens = usage.cached_tokens;
+            self.output_tokens = usage.output_tokens;
+            self.reasoning_tokens = usage.reasoning_tokens;
+        }
+        self
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Receipt {
     pub invocation_id: String,
     pub parent_cell: String,
     pub requests: Vec<RequestId>,
+    pub request_observations: Vec<RequestObservation>,
+    /// Monotonic invocation wall time, including callbacks.
+    pub duration_ms: u64,
     pub counts: Counts,
     pub cell_counts: Counts,
     /// Items remain durable in Store; wire receipts carry request evidence references.
@@ -746,10 +800,13 @@ impl Invocation {
         });
         let result_schema = options.result_schema;
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let started = Instant::now();
         let transport = BudgetTransport {
             inner: transport,
             budget: budget.clone(),
             requests: requests.clone(),
+            observations: observations.clone(),
             closed: closed.clone(),
             closed_signal: closed_signal.clone(),
             invocation_counts: invocation_counts.clone(),
@@ -828,6 +885,8 @@ impl Invocation {
                 invocation_id,
                 parent_cell,
                 requests,
+                request_observations: observations.lock().unwrap().clone(),
+                duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
                 counts: invocation_counts.lock().unwrap().clone(),
                 cell_counts: budget
                     .scopes
@@ -911,6 +970,8 @@ impl Invocation {
             invocation_id: self.identity.0.clone(),
             parent_cell: self.identity.1.clone(),
             requests: Vec::new(),
+            request_observations: Vec::new(),
+            duration_ms: 0,
             counts: Counts::default(),
             cell_counts: Counts::default(),
             transcript: Vec::new(),
@@ -1647,9 +1708,17 @@ mod tests {
         assert!(matches!(receipt.outcome, Outcome::Text(_)));
         assert_eq!(receipt.counts.unknown_usage_requests, 1);
         assert_eq!(receipt.counts.reported_tokens, 0);
+        assert_eq!(receipt.request_observations.len(), 1);
+        let observation = &receipt.request_observations[0];
+        assert_eq!(observation.request_id, receipt.requests[0]);
+        assert_eq!(observation.input_tokens, None);
+        assert_eq!(observation.output_tokens, None);
+        assert!(receipt.duration_ms >= observation.duration_ms);
         let mut partial = final_turn();
         partial.usage.input_tokens = Some(7);
         partial.usage.output_tokens = None;
+        partial.usage.cached_tokens = Some(0);
+        partial.usage.reasoning_tokens = Some(0);
         let mut invocation = start(
             Arc::new(Store::memory().unwrap()),
             Arc::new(JobScheduler::new(1).unwrap()),
@@ -1660,6 +1729,16 @@ mod tests {
         let receipt = finish(&mut invocation).await;
         assert_eq!(receipt.counts.reported_tokens, 7);
         assert_eq!(receipt.counts.unknown_usage_requests, 1);
+        let observation = &receipt.request_observations[0];
+        assert_eq!(observation.input_tokens, Some(7));
+        assert_eq!(observation.output_tokens, None);
+        assert_eq!(observation.cached_tokens, Some(0));
+        assert_eq!(observation.reasoning_tokens, Some(0));
+        assert!(!observation.model.is_empty());
+        let encoded = serde_json::to_value(observation).unwrap();
+        assert_eq!(encoded["output_tokens"], Value::Null);
+        assert_eq!(encoded["cached_tokens"], 0);
+        assert!(encoded.get("raw").is_none());
     }
     #[tokio::test]
     async fn pruning_projects_only_model_input_and_retains_original_output() {
