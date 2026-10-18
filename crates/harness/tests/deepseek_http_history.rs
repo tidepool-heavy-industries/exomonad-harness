@@ -143,8 +143,12 @@ impl Provider for NoTools {
         profile: harness::transport::ToolEncodingProfile,
     ) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
         assert_eq!(profile, ResponsesRoute::DeepSeek.tool_encoding_profile());
-        assert!(self.tools().is_empty());
+        assert!(self.all_tools().is_empty());
         Ok(None)
+    }
+
+    fn all_tools(&self) -> Vec<Value> {
+        self.tools()
     }
 
     fn tools(&self) -> Vec<Value> {
