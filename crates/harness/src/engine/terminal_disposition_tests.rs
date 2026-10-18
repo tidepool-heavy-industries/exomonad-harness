@@ -66,6 +66,119 @@ impl HostActor for LocalHost {
         panic!("no host control in terminal matrix")
     }
 }
+fn assert_native_request(gemini: bool, headers: &str, request: &Value) {
+    assert!(headers.contains("accept: text/event-stream"));
+    assert!(headers.contains("content-type: application/json"));
+    assert_eq!(request["stream"], true);
+    assert_eq!(
+        request["model"],
+        if gemini {
+            "gemini-4-argon"
+        } else {
+            "deepseek-v4-pro"
+        }
+    );
+    assert!(request["input"].is_array());
+    for field in [
+        "previous_response_id",
+        "conversation",
+        "include",
+        "prompt_cache_key",
+        "prompt_cache_options",
+    ] {
+        assert!(
+            request.get(field).is_none(),
+            "unsupported native field {field}"
+        );
+    }
+    for header in [
+        "chatgpt-account-id:",
+        "session-id:",
+        "thread-id:",
+        "x-client-request-id:",
+        "content-encoding:",
+    ] {
+        assert!(
+            !headers.contains(header),
+            "unexpected OpenAI header {header}"
+        );
+    }
+    let allowed: &[&str] = if gemini {
+        assert!(headers.contains("x-goog-api-key: offline-native-terminal-key"));
+        assert!(!headers.contains("authorization:"));
+        assert_eq!(request["store"], false);
+        assert_eq!(request["generation_config"]["thinking_level"], "low");
+        assert_eq!(request["generation_config"]["thinking_summaries"], "auto");
+        assert_eq!(request["generation_config"]["max_output_tokens"], 65_536);
+        &[
+            "model",
+            "input",
+            "store",
+            "stream",
+            "generation_config",
+            "system_instruction",
+            "tools",
+        ]
+    } else {
+        assert!(headers.contains("authorization: bearer offline-native-terminal-key"));
+        assert!(!headers.contains("x-goog-api-key:"));
+        assert!(request.get("store").is_none());
+        assert_eq!(request["reasoning"], json!({"effort":"low"}));
+        assert_eq!(request["max_output_tokens"], 65_536);
+        assert!(
+            request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item.get("encrypted_content").is_none())
+        );
+        &[
+            "model",
+            "input",
+            "stream",
+            "max_output_tokens",
+            "reasoning",
+            "instructions",
+            "tools",
+            "tool_choice",
+        ]
+    };
+    assert!(
+        request
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|field| allowed.contains(&field.as_str()))
+    );
+    if let Some(tools) = request.get("tools") {
+        assert!(!tools.as_array().unwrap().is_empty());
+        assert_eq!(
+            if gemini {
+                &request["generation_config"]["tool_choice"]
+            } else {
+                &request["tool_choice"]
+            },
+            "auto"
+        );
+        for tool in tools.as_array().unwrap() {
+            assert_eq!(tool["type"], "function");
+            assert!(tool["name"].is_string());
+            assert!(tool["parameters"].is_object());
+            assert!(tool.get("namespace").is_none());
+            assert!(tool.get("async").is_none());
+            if gemini {
+                assert!(tool.get("strict").is_none());
+            } else {
+                assert_eq!(tool["strict"], true);
+            }
+        }
+    } else if gemini {
+        assert!(request["generation_config"].get("tool_choice").is_none());
+    } else {
+        assert!(request.get("tool_choice").is_none());
+    }
+}
+
 struct NativeHttp {
     directory: PathBuf,
     admission: NativeTransportAdmission,
@@ -95,7 +208,7 @@ impl NativeHttp {
             )
         } else {
             Item(
-                json!({"type":"reasoning","id":"prefix","summary":[],"encrypted_content":"opaque+/λ="}),
+                json!({"type":"reasoning","id":"prefix","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"retained native λ"}]}),
             )
         };
         let mut events = if gemini {
@@ -114,7 +227,7 @@ impl NativeHttp {
             if gemini {
                 events.extend([json!({"event_type":"step.start","index":2,"step":{"type":"thought","signature":"gapped"}}),json!({"event_type":"step.stop","index":2})]);
             } else {
-                events.push(json!({"type":"response.output_item.done","output_index":2,"item":{"type":"reasoning","id":"gap","summary":[]}}));
+                events.push(json!({"type":"response.output_item.done","output_index":2,"item":{"type":"reasoning","id":"gap","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"gapped"}]}}));
             }
         }
         let terminal = match (gemini, end) {
@@ -183,14 +296,9 @@ impl NativeHttp {
                     if request.len() < end + 4 + length {
                         continue;
                     }
-                    assert!(headers.contains(if gemini {
-                        "x-goog-api-key: offline-native-terminal-key"
-                    } else {
-                        "authorization: bearer offline-native-terminal-key"
-                    }));
                     let json: Value =
                         serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
-                    assert_eq!(json["store"], false);
+                    assert_native_request(gemini, &headers, &json);
                     request_receipt.store(true, Ordering::SeqCst);
                     break;
                 }
