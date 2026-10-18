@@ -248,6 +248,8 @@ impl Assembly {
     pub(super) fn accept(
         &mut self,
         data: &str,
+        token: &str,
+        account: &str,
         observation: &mut super::TransportObservation,
     ) -> Result<Vec<StreamEvent>, TransportError> {
         let event: Value =
@@ -349,9 +351,10 @@ impl Assembly {
                         }
                         let parts = step.native["content"].as_array_mut().ok_or_else(invalid)?;
                         if let Some(last) = parts.last_mut().filter(|part| part["type"] == "text") {
-                            let joined =
-                                format!("{}{}", last["text"].as_str().ok_or_else(invalid)?, text);
-                            last["text"] = joined.into();
+                            let Value::String(accumulated) = &mut last["text"] else {
+                                return Err(invalid());
+                            };
+                            accumulated.push_str(text);
                         } else {
                             parts.push(json!({"type":"text","text":text}));
                         }
@@ -446,22 +449,50 @@ impl Assembly {
                         self.terminal = Some(usage);
                     }
                     Some("incomplete" | "budget_exceeded") => {
+                        let reason = (interaction["status"] == "budget_exceeded")
+                            .then_some(super::IncompleteReason::BudgetExceeded);
+                        let (response_id, truncated) = super::observation::metadata(
+                            self.id.as_deref().unwrap(),
+                            token,
+                            account,
+                        );
+                        observation.metadata_truncated |= truncated;
                         observation.terminal = Some(super::ResponseTerminal::Incomplete {
-                            response_id: self.id.clone().unwrap(),
-                            reason: None,
+                            response_id: response_id.clone(),
+                            reason,
                         });
-                        return Err(protocol("incomplete Gemini interaction"));
+                        return Err(TransportError::ResponseIncomplete {
+                            response_id,
+                            reason,
+                        });
                     }
                     Some("failed" | "cancelled") => {
-                        observation.terminal = Some(super::ResponseTerminal::ResponseFailed);
-                        return Err(protocol("Gemini interaction failed"));
+                        let (event, terminal) = if interaction["status"] == "failed" {
+                            (
+                                super::ProviderStreamFailureEvent::InteractionFailed,
+                                super::ResponseTerminal::InteractionFailed,
+                            )
+                        } else {
+                            (
+                                super::ProviderStreamFailureEvent::InteractionCancelled,
+                                super::ResponseTerminal::InteractionCancelled,
+                            )
+                        };
+                        observation.terminal = Some(terminal);
+                        return Err(TransportError::ProviderStreamFailure {
+                            event,
+                            diagnostic: None,
+                        });
                     }
                     _ => return Err(protocol("unsupported interaction status")),
                 }
             }
             "error" => {
                 observation.terminal = Some(super::ResponseTerminal::Error);
-                return Err(protocol("Gemini stream error"));
+                return Err(TransportError::ProviderStreamFailure {
+                    event: super::ProviderStreamFailureEvent::Error,
+                    diagnostic: None,
+                });
             }
             _ => return Err(protocol("unsupported Interactions event")),
         }
@@ -486,9 +517,9 @@ impl Assembly {
         self.terminal.is_some()
     }
     pub(super) fn finish(self) -> Result<ResponsesTurn, TransportError> {
-        let usage = self
-            .terminal
-            .ok_or_else(|| protocol("missing terminal Gemini interaction"))?;
+        let usage = self.terminal.ok_or(TransportError::IncompleteResponse(
+            super::StreamInterruption::MissingCompletion,
+        ))?;
         let response_id = self.id.ok_or_else(invalid)?;
         let mut items = Vec::new();
         for (expected, (index, step)) in self.steps.into_iter().enumerate() {
@@ -510,5 +541,7 @@ impl Assembly {
     }
 }
 
+#[cfg(test)]
+mod terminal_tests;
 #[cfg(test)]
 mod tests;

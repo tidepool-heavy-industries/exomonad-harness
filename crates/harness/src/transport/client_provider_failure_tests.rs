@@ -98,6 +98,7 @@ async fn provider_failure_diagnostic_survives_engine_block_reopen_and_recovery_r
             }
             ProviderStreamFailureEvent::Error => json!({"type":"error", "error":payload,
                 "request":{"input":"private prompt"}, "authorization":TOKEN}),
+            _ => unreachable!("this Responses fixture enumerates only Responses failure events"),
         };
         let body = format!("data: {packet}\n\n");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

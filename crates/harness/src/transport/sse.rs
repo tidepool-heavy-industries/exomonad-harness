@@ -315,33 +315,35 @@ impl ResponseAssembly {
                 })
             }
             Some(kind @ ("response.failed" | "error")) => {
-                let failure = if kind == "response.failed" {
+                let response_failed = kind == "response.failed";
+                let failure = if response_failed {
                     ProviderStreamFailureEvent::ResponseFailed
                 } else {
                     ProviderStreamFailureEvent::Error
                 };
                 if let Some(observation) = observation.as_deref_mut() {
-                    observation.terminal = Some(match failure {
-                        ProviderStreamFailureEvent::ResponseFailed => {
-                            super::ResponseTerminal::ResponseFailed
-                        }
-                        ProviderStreamFailureEvent::Error => super::ResponseTerminal::Error,
+                    observation.terminal = Some(if response_failed {
+                        super::ResponseTerminal::ResponseFailed
+                    } else {
+                        super::ResponseTerminal::Error
                     });
                 }
-                let nested_error = match failure {
-                    ProviderStreamFailureEvent::ResponseFailed => event
+                let nested_error = if response_failed {
+                    event
                         .get("response")
-                        .and_then(|response| response.get("error")),
-                    ProviderStreamFailureEvent::Error => {
-                        event.get("error").filter(|error| error.is_object())
-                    }
+                        .and_then(|response| response.get("error"))
+                } else {
+                    event.get("error").filter(|error| error.is_object())
                 };
                 let field = |name: &str| {
                     nested_error
                         .and_then(|error| error.get(name)?.as_str())
-                        .or_else(|| match failure {
-                            ProviderStreamFailureEvent::ResponseFailed => None,
-                            ProviderStreamFailureEvent::Error => event.get(name)?.as_str(),
+                        .or_else(|| {
+                            if response_failed {
+                                None
+                            } else {
+                                event.get(name)?.as_str()
+                            }
                         })
                 };
                 Err(TransportError::ProviderStreamFailure {

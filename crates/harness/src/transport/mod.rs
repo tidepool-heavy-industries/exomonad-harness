@@ -300,6 +300,10 @@ pub enum CredentialFailure {
 pub enum ProviderStreamFailureEvent {
     #[error("response.failed")]
     ResponseFailed,
+    #[error("interaction failed")]
+    InteractionFailed,
+    #[error("interaction cancelled")]
+    InteractionCancelled,
     #[error("error")]
     Error,
 }
@@ -311,7 +315,7 @@ pub enum ProviderStreamFailureEvent {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum StreamInterruption {
-    #[error("missing response.completed")]
+    #[error("missing provider completion")]
     MissingCompletion,
     #[error("SSE read failed")]
     ReadFailed,

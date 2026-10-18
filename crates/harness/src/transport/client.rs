@@ -900,7 +900,7 @@ impl ProviderAssembly {
             Self::Responses(assembly) => assembly
                 .accept_observed(data, token, account, Some(observation))
                 .map(|event| event.into_iter().collect()),
-            Self::Interactions(assembly) => assembly.accept(data, observation),
+            Self::Interactions(assembly) => assembly.accept(data, token, account, observation),
         }
     }
     fn is_complete(&self) -> bool {

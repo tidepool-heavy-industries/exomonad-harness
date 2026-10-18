@@ -11,6 +11,7 @@ const METADATA_BYTES: usize = 128;
 #[serde(rename_all = "snake_case")]
 pub enum IncompleteReason {
     MaxOutputTokens,
+    BudgetExceeded,
     ContentFilter,
     Steered,
     Unknown,
@@ -77,6 +78,8 @@ impl EventKind {
 pub enum ResponseTerminal {
     Completed,
     ResponseFailed,
+    InteractionFailed,
+    InteractionCancelled,
     Error,
     Incomplete {
         response_id: String,

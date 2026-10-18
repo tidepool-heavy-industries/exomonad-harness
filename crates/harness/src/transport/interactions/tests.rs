@@ -10,7 +10,7 @@ fn observation() -> TransportObservation {
     TransportObservation::new(ResponseEnd::ProviderTerminal)
 }
 fn send(assembly: &mut Assembly, event: Value) -> Result<Vec<StreamEvent>, TransportError> {
-    assembly.accept(&event.to_string(), &mut observation())
+    assembly.accept(&event.to_string(), "", "", &mut observation())
 }
 fn created() -> Assembly {
     let mut assembly = Assembly::default();
