@@ -665,12 +665,11 @@ async fn malformed_http_is_failed_protocol_not_interrupted_or_declared_terminal(
             completed: None,
         },
     )
-    .await
-    .with_origin(store.standalone_identity(identity().actor));
+    .await;
     let (_stop, cancel) = watch::channel(false);
     let outcome = tokio::time::timeout(
         Duration::from_secs(10),
-        engine.run(
+        engine.run_embedded(
             None,
             vec![Item::user_text("refuse malformed stream")],
             cancel,
@@ -685,25 +684,50 @@ async fn malformed_http_is_failed_protocol_not_interrupted_or_declared_terminal(
     }
     http.diagnose("malformed stream", &store, &calls);
     let error = outcome.unwrap().unwrap_err();
+    let EngineError::BlockedAction(failure) = error else {
+        panic!("lost protocol failure block: {error:?}");
+    };
     assert!(matches!(
-        error,
+        failure.primary(),
         EngineError::Transport(TransportError::Stream(_))
     ));
+    let block = failure.block().clone();
+    assert_eq!(block.reason, InferenceBlockReason::ContinuityUnproven);
     let events = store.events(None).unwrap();
     let observed = events
         .iter()
         .find(|e| e.kind == "responses_transport")
         .unwrap();
     let request = observed.request.clone().unwrap();
+    assert_eq!(request, block.request);
     assert_eq!(summary(&store, &request).end, ResponseEnd::ProtocolError);
     assert_eq!(summary(&store, &request).terminal, None);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(http.requests.load(Ordering::SeqCst), 1);
+    assert!(store.claims_on(&request).unwrap().is_empty());
+    assert!(
+        store
+            .items(&request)
+            .unwrap()
+            .iter()
+            .all(|item| item.0.get("gemini_step").is_none())
+    );
+    assert!(
+        store
+            .reserve_automatic_retry(&identity(), &block)
+            .unwrap()
+            .is_none()
+    );
     drop(engine);
     drop(store);
+    let reopened = http.store();
     assert_eq!(
-        http.store().provider_response_state(&request).unwrap(),
+        reopened.provider_response_state(&request).unwrap(),
         Some(ProviderResponseState::Failed)
+    );
+    assert_eq!(
+        reopened.embedded_inference_state(&identity()).unwrap(),
+        HostInferenceState::Blocked { block }
     );
 }
 
