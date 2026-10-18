@@ -57,7 +57,9 @@ pub(super) fn request(
         }
     }
     let mut input = Vec::new();
-    let mut calls = HashMap::<String, String>::new();
+    let mut calls = HashMap::<String, (String, usize)>::new();
+    let mut results = Vec::<Option<Value>>::new();
+    let mut result_slots = Vec::new();
     for (item, authored) in request.input.iter().zip(authored) {
         if item.is_configuration_update() {
             continue;
@@ -72,11 +74,18 @@ pub(super) fn request(
             if step["type"] == "function_call" {
                 let id = step["id"].as_str().ok_or_else(invalid)?;
                 if calls
-                    .insert(id.into(), step["name"].as_str().ok_or_else(invalid)?.into())
+                    .insert(
+                        id.into(),
+                        (
+                            step["name"].as_str().ok_or_else(invalid)?.into(),
+                            results.len(),
+                        ),
+                    )
                     .is_some()
                 {
                     return Err(invalid());
                 }
+                results.push(None);
             }
             input.push(step.clone());
             continue;
@@ -99,21 +108,29 @@ pub(super) fn request(
             }
             Some("function_call_output") => {
                 let id = item.0["call_id"].as_str().ok_or_else(invalid)?;
-                let name = calls.remove(id).ok_or_else(invalid)?;
+                let (name, ordinal) = calls.remove(id).ok_or_else(invalid)?;
                 let output = item.0.get("output").ok_or_else(invalid)?;
                 let result = match output {
                     Value::String(text) => json!([{"type":"text","text":text}]),
                     other => other.clone(),
                 };
-                input.push(
+                results[ordinal] = Some(
                     json!({"type":"function_result","call_id":id,"name":name,"result":result}),
                 );
+                result_slots.push(input.len());
+                input.push(Value::Null);
             }
             _ => return Err(invalid()),
         }
     }
     if !calls.is_empty() {
         return Err(invalid());
+    }
+    // Native siblings retain their exact positions and bytes. Settlements occupy
+    // their existing input slots in call issuance order, independently of when
+    // the callbacks completed. Ordinals distinguish IDs reused in later turns.
+    for (slot, result) in result_slots.into_iter().zip(results) {
+        input[slot] = result.ok_or_else(invalid)?;
     }
     let mut config = json!({"thinking_level":effort,"thinking_summaries":"auto"});
     if let Some(limit) = limits.max_output_tokens {
@@ -182,17 +199,21 @@ fn project(step: Value, display_id: &str) -> Result<Item, TransportError> {
             json!({"type":"reasoning","id":display_id,"summary":summaries})
         }
         "model_output" => {
-            let parts = step
-                .get("content")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|part| {
-                    part["text"]
-                        .as_str()
-                        .map(|text| json!({"type":"output_text","text":text}))
-                })
-                .collect::<Vec<_>>();
+            let parts = match step.get("content") {
+                None => Vec::new(),
+                Some(content) => content
+                    .as_array()
+                    .ok_or_else(invalid)?
+                    .iter()
+                    .map(|part| {
+                        if part["type"] != "text" {
+                            return Err(invalid());
+                        }
+                        let text = part["text"].as_str().ok_or_else(invalid)?;
+                        Ok(json!({"type":"output_text","text":text}))
+                    })
+                    .collect::<Result<Vec<_>, TransportError>>()?,
+            };
             json!({"type":"message","id":display_id,"role":"assistant","content":parts})
         }
         _ => json!({"type":"gemini_native","id":display_id}),

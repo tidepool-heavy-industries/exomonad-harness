@@ -139,9 +139,12 @@ fn arguments_fragments_and_out_of_order_stops_release_calls_in_provider_order() 
     assert_eq!(body["input"][2], turn.items[1].0["gemini_step"]);
     assert_eq!(
         body["input"][3],
+        json!({"type":"function_result","call_id":"a","name":"echo","result":{"ok":true}})
+    );
+    assert_eq!(
+        body["input"][4],
         json!({"type":"function_result","call_id":"b","name":"echo","result":[{"type":"text","text":"second"}]})
     );
-    assert_eq!(body["input"][4]["result"], json!({"ok":true}));
 }
 
 #[test]
@@ -467,18 +470,24 @@ mod joined_http {
         let db = files.0.join("store.sqlite");
         let store = Arc::new(Store::open(&db).unwrap());
         let mut invocation = Invocation::start::<GeminiAuth,_>(ResponsesClient::new(auth), store.clone(),
-            Arc::new(JobScheduler::new(1).unwrap()), EngineConfig {
+            Arc::new(JobScheduler::new(2).unwrap()), EngineConfig {
                 instructions:"joined native workflow".into(),
                 tools:vec![json!({"type":"function","name":"echo","strict":true,"parameters":{"type":"object","properties":{"n":{"type":"integer"}},"required":["n"],"additionalProperties":false}})],
                 model:"gemini-4-argon".into(), effort:Effort::High, session_id:"joined".into(), agent:AgentPath("/joined".into()),
             }, "joined-http".into(), CellBudget::new(Limits {requests:2,tools:2,reported_tokens:1000,seconds:20}),
             vec![Item::user_text("run both λ")], InvocationOptions::default()).unwrap();
+        let mut callbacks = Vec::new();
         for n in [1, 2] {
             let InvocationStep::Callback(callback) = next(&mut invocation).await else {
                 panic!("native call {n} must reach production callback")
             };
             assert_eq!(callback.name, "echo");
             assert_eq!(callback.arguments, json!({"n":n}));
+            callbacks.push(callback);
+        }
+        // Completion order deliberately opposes the provider's sibling order.
+        for callback in callbacks.into_iter().rev() {
+            let n = callback.arguments["n"].clone();
             callback
                 .complete(Ok(json!({"answer":n,"nested":{"λ":[true,null]}})))
                 .unwrap();
@@ -671,4 +680,84 @@ mod joined_http {
         );
         assert_eq!(store.provider_response_state(&id).unwrap(), None);
     }
+}
+
+#[test]
+fn sibling_results_require_exact_membership_and_preserve_issuance_order_across_reused_ids() {
+    let call = |id: &str, n: u64| {
+        project(
+            json!({"type":"function_call","id":id,"name":"echo","arguments":{"n":n}}),
+            &format!("display-{n}"),
+        )
+        .unwrap()
+    };
+    let output = |id: &str, n: u64| {
+        Item(json!({"type":"function_call_output","call_id":id,"output":{"n":n}}))
+    };
+    let a = call("z-last-lexically", 1);
+    let b = call("a-first-lexically", 2);
+    for outputs in [
+        vec![output("z-last-lexically", 1)],
+        vec![output("z-last-lexically", 1), output("z-last-lexically", 1)],
+        vec![output("z-last-lexically", 1), output("unmatched", 2)],
+    ] {
+        let mut dto = request_fixture();
+        dto.input.extend([a.clone(), b.clone()]);
+        dto.input.extend(outputs);
+        assert!(normalize(&dto, &vec![false; dto.input.len()]).is_err());
+    }
+    let later = call("z-last-lexically", 3);
+    let mut dto = request_fixture();
+    dto.input.extend([
+        a.clone(),
+        b.clone(),
+        output("a-first-lexically", 2),
+        output("z-last-lexically", 1),
+        later.clone(),
+        output("z-last-lexically", 3),
+    ]);
+    let body = normalize(&dto, &vec![false; dto.input.len()]).unwrap();
+    let results = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|step| step["type"] == "function_result")
+        .map(|step| step["result"]["n"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results, vec![1, 2, 3]);
+    for (index, item) in [(1, a), (2, b), (5, later)] {
+        assert_eq!(body["input"][index], item.0["gemini_step"]);
+    }
+}
+
+#[test]
+fn known_model_output_refuses_unsupported_or_malformed_content_without_text_success() {
+    for content in [
+        json!([{"type":"image","data":"opaque","mime_type":"image/png"}]),
+        json!([{"type":"image","text":"misleading text"}]),
+        json!([{"type":"text","text":"visible"},{"type":"audio","data":"opaque"}]),
+        json!([{"type":"text","text":42}]),
+        json!({"type":"text","text":"not an array"}),
+    ] {
+        let mut assembly = created();
+        start(
+            &mut assembly,
+            0,
+            json!({"type":"model_output","content":content}),
+        );
+        assert!(
+            send(&mut assembly, json!({"event_type":"step.stop","index":0})).is_err(),
+            "unsupported output became a completed text item: {content}"
+        );
+    }
+    let mut assembly = created();
+    let native = json!({"type":"future_server_observation","payload":{"opaque":"retain"}});
+    start(&mut assembly, 0, native.clone());
+    let events = stop(&mut assembly, 0);
+    let StreamEvent::CompletedItem(done) = &events[0] else {
+        panic!("expected inert native evidence")
+    };
+    assert_eq!(done.item().0["type"], "gemini_native");
+    assert_eq!(done.item().0["gemini_step"], native);
+    assert!(done.item().tool_call().unwrap().is_none());
 }
