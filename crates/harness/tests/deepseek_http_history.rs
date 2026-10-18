@@ -138,6 +138,15 @@ struct NoTools;
 
 #[async_trait]
 impl Provider for NoTools {
+    async fn request_snapshot_with_encoding(
+        &self,
+        profile: harness::transport::ToolEncodingProfile,
+    ) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
+        assert_eq!(profile, ResponsesRoute::DeepSeek.tool_encoding_profile());
+        assert!(self.tools().is_empty());
+        Ok(None)
+    }
+
     fn tools(&self) -> Vec<Value> {
         vec![]
     }
