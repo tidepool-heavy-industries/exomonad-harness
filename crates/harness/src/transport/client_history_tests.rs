@@ -386,3 +386,69 @@ async fn reader_terminal_matrix_includes_empty_gapped_and_retained_prefixes() {
         }
     }
 }
+
+#[tokio::test]
+async fn dropped_native_reader_preserves_partial_facts_without_issuing_interruption() {
+    for gemini in [false, true] {
+        let history = History {
+            gemini,
+            rows: vec![("partial λ😀".into(), 0)],
+            gap: false,
+            unfinished: false,
+            end: End::Eof,
+            line_ending: "\r\n",
+        };
+        let mut body = history.wire();
+        let partial = b"data: {\"unfinished-private-body\":";
+        body.extend_from_slice(partial);
+        let bytes = body.len() as u64;
+        let stream = futures_util::stream::once(async move { Ok::<_, std::io::Error>(body) })
+            .chain(futures_util::stream::pending());
+        let response = reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(200)
+                .body(reqwest::Body::wrap_stream(stream))
+                .unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (publisher, observation) = tokio::sync::oneshot::channel();
+        let mut reader = Box::pin(async move {
+            let mut guard = ObservationGuard::new(Some(publisher), None);
+            read_response_observed(
+                response,
+                Some(tx),
+                "",
+                "",
+                &mut guard,
+                if gemini {
+                    ResponsesRoute::GeminiInteractions
+                } else {
+                    ResponsesRoute::DeepSeek
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                outcome = &mut reader => panic!("running native reader settled: {outcome:?}"),
+                event = rx.recv() => {
+                    let Some(StreamEvent::CompletedItem(done)) = event else { panic!("missing completed prefix"); };
+                    assert_eq!(done.item(), &history.expected_items()[0]);
+                }
+            }
+            assert!(futures_util::poll!(&mut reader).is_pending());
+        }).await.unwrap();
+        drop(reader);
+        let observed = observation.await.unwrap();
+        assert_eq!(observed.end, ResponseEnd::Abandoned);
+        assert_eq!(observed.terminal, None);
+        assert_eq!(observed.received_bytes, Some(bytes));
+        assert_eq!(observed.unframed_line_bytes, partial.len() as u64);
+        assert!(rx.recv().await.is_none());
+        assert!(
+            !serde_json::to_string(&observed)
+                .unwrap()
+                .contains("unfinished-private-body")
+        );
+    }
+}
