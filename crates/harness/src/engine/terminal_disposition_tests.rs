@@ -1,6 +1,10 @@
 //! The ordinary and compaction consumers retain the same stopped-provider facts
 //! through real native admission, HTTP, Engine persistence and Store reopen.
 use super::*;
+use crate::embedding::{
+    AdmissionGuard, Conversation, EmbeddedError, HostActor, HostControl, HostControlError,
+    HostIdentity, ToolSurface,
+};
 use crate::store::{ProviderRequestPurpose, ProviderResponseState};
 use crate::transport::{
     CredentialReference, IncompleteReason, InferenceLimits, NativeTransportAdmission,
@@ -9,7 +13,13 @@ use crate::transport::{
     auth::{DeepSeekAuth, GeminiAuth},
 };
 use serde_json::Value;
-use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, time::Duration};
+use std::{
+    io::Write,
+    os::unix::fs::OpenOptionsExt,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Clone, Copy, Debug)]
@@ -32,11 +42,36 @@ impl Provider for NoEffects {
         vec![]
     }
 }
+struct LocalHost {
+    identity: HostIdentity,
+    surface: Arc<ToolSurface>,
+}
+struct LocalAdmission;
+impl AdmissionGuard for LocalAdmission {}
+#[async_trait::async_trait]
+impl HostActor for LocalHost {
+    fn identity(&self) -> &HostIdentity {
+        &self.identity
+    }
+    async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+        Ok(Box::new(LocalAdmission))
+    }
+    async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+        Ok(self.surface.clone())
+    }
+    async fn wake(&self, _: i64) -> Result<(), String> {
+        panic!("no input wake in terminal matrix")
+    }
+    async fn control(&self, _: HostControl) -> Result<Value, HostControlError> {
+        panic!("no host control in terminal matrix")
+    }
+}
 struct NativeHttp {
     directory: PathBuf,
     admission: NativeTransportAdmission,
     prefix: Item,
     server: tokio::task::JoinHandle<()>,
+    authenticated_request: Arc<AtomicBool>,
 }
 impl NativeHttp {
     async fn new(gemini: bool, end: End) -> Self {
@@ -125,6 +160,8 @@ impl NativeHttp {
                 "/responses"
             }
         );
+        let authenticated_request = Arc::new(AtomicBool::new(false));
+        let request_receipt = authenticated_request.clone();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -154,6 +191,7 @@ impl NativeHttp {
                     let json: Value =
                         serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
                     assert_eq!(json["store"], false);
+                    request_receipt.store(true, Ordering::SeqCst);
                     break;
                 }
             }
@@ -186,6 +224,7 @@ impl NativeHttp {
             admission,
             prefix,
             server,
+            authenticated_request,
         }
     }
     fn store(&self) -> Arc<Store> {
@@ -215,11 +254,27 @@ async fn check<A: Auth + Clone + 'static>(
     let store = http.store();
     let client = ResponsesClient::new(auth);
     let selected = client.prepare_submission().unwrap();
+    let conversation = Conversation::attach(
+        store.clone(),
+        Arc::new(LocalHost {
+            identity: HostIdentity {
+                run: "native-terminal".into(),
+                actor: AgentPath("/test".into()),
+                incarnation: "one".into(),
+            },
+            surface: Arc::new(
+                ToolSurface::new("terminal-matrix".into(), vec![], Arc::new(NoEffects)).unwrap(),
+            ),
+        }),
+        None,
+    )
+    .await
+    .unwrap();
     let engine = Engine::<A, _, _>::with_transport(
         client,
         store.clone(),
         Arc::new(JobScheduler::new(1).unwrap()),
-        Arc::new(NoEffects),
+        conversation.provider(),
         EngineConfig {
             instructions: "native terminal disposition".into(),
             tools: vec![],
@@ -279,6 +334,10 @@ async fn check<A: Auth + Clone + 'static>(
     };
     eprintln!(
         "native terminal assertion: gemini={gemini} compaction={compaction} end={end:?} actual={error:?}"
+    );
+    assert!(
+        http.authenticated_request.load(Ordering::SeqCst),
+        "terminal matrix did not reach authenticated HTTP: gemini={gemini} compaction={compaction} end={end:?} actual={error:?}"
     );
     let state = match end {
         End::Eof | End::ReadFailure => {
