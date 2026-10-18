@@ -470,24 +470,20 @@ mod joined_http {
         let db = files.0.join("store.sqlite");
         let store = Arc::new(Store::open(&db).unwrap());
         let mut invocation = Invocation::start::<GeminiAuth,_>(ResponsesClient::new(auth), store.clone(),
-            Arc::new(JobScheduler::new(2).unwrap()), EngineConfig {
+            Arc::new(JobScheduler::new(1).unwrap()), EngineConfig {
                 instructions:"joined native workflow".into(),
                 tools:vec![json!({"type":"function","name":"echo","strict":true,"parameters":{"type":"object","properties":{"n":{"type":"integer"}},"required":["n"],"additionalProperties":false}})],
                 model:"gemini-4-argon".into(), effort:Effort::High, session_id:"joined".into(), agent:AgentPath("/joined".into()),
             }, "joined-http".into(), CellBudget::new(Limits {requests:2,tools:2,reported_tokens:1000,seconds:20}),
             vec![Item::user_text("run both λ")], InvocationOptions::default()).unwrap();
-        let mut callbacks = Vec::new();
+        // Invocation exposes one callback until its continuation is resumed.
+        // Reversed settlement arrival is covered through the request normalizer.
         for n in [1, 2] {
             let InvocationStep::Callback(callback) = next(&mut invocation).await else {
                 panic!("native call {n} must reach production callback")
             };
             assert_eq!(callback.name, "echo");
             assert_eq!(callback.arguments, json!({"n":n}));
-            callbacks.push(callback);
-        }
-        // Completion order deliberately opposes the provider's sibling order.
-        for callback in callbacks.into_iter().rev() {
-            let n = callback.arguments["n"].clone();
             callback
                 .complete(Ok(json!({"answer":n,"nested":{"λ":[true,null]}})))
                 .unwrap();
