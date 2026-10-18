@@ -365,7 +365,12 @@ fn deepseek_request(
                 }
             }
             Some("reasoning") => {
-                if item.get("encrypted_content").is_some_and(|v| !v.is_null())
+                // Same-provider response provenance is checked by Store before
+                // normalization. DeepSeek also returns encrypted_content as
+                // metadata alongside replayable plaintext; retain it verbatim.
+                if item
+                    .get("encrypted_content")
+                    .is_some_and(|v| !v.is_null() && !v.is_string())
                     || item
                         .get("summary")
                         .is_some_and(|v| !v.is_null() && v.as_array().is_none_or(|a| !a.is_empty()))
@@ -373,9 +378,10 @@ fn deepseek_request(
                     return Err(refuse(Unsupported::ReasoningContent));
                 }
                 if !item["content"].as_array().is_some_and(|parts| {
-                    parts
-                        .iter()
-                        .all(|part| part["type"] == "reasoning_text" && part["text"].is_string())
+                    (!parts.is_empty() || item.get("encrypted_content").is_none_or(Value::is_null))
+                        && parts.iter().all(|part| {
+                            part["type"] == "reasoning_text" && part["text"].is_string()
+                        })
                 }) {
                     return Err(refuse(Unsupported::ReasoningContent));
                 }

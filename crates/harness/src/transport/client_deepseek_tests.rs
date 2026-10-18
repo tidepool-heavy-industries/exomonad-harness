@@ -139,6 +139,14 @@ fn deepseek_refuses_unsupported_semantics_and_invalid_endpoints() {
             UnsupportedSemantics::ReasoningContent,
         ),
         (
+            json!({"type":"reasoning","content":[{"type":"reasoning_text","text":"plaintext"}],"encrypted_content":{}}),
+            UnsupportedSemantics::ReasoningContent,
+        ),
+        (
+            json!({"type":"reasoning","content":[{"type":"reasoning_text","text":"plaintext"}],"summary":[{"type":"summary_text","text":"unsupported summary"}]}),
+            UnsupportedSemantics::ReasoningContent,
+        ),
+        (
             json!({"type":"reasoning","content":[],"summary":[{"text":"not plaintext reasoning"}]}),
             UnsupportedSemantics::ReasoningContent,
         ),
@@ -196,6 +204,41 @@ fn deepseek_refuses_unsupported_semantics_and_invalid_endpoints() {
             UnsupportedSemantics::ReasoningEffort
         ))
     ));
+}
+
+#[test]
+fn deepseek_preserves_plaintext_reasoning_optional_metadata() {
+    let mut original = json!({"type":"reasoning","id":"reasoning-1","status":"completed",
+        "content":[{"type":"reasoning_text","text":"provider plaintext"}],"summary":[]});
+    for metadata in [
+        None,
+        Some(Value::Null),
+        Some(json!("provider-owned-metadata")),
+    ] {
+        if let Some(metadata) = metadata {
+            original["encrypted_content"] = metadata;
+        }
+        let dto = ResponsesRequest {
+            input: vec![Item(original.clone())],
+            ..request()
+        };
+        let body = deepseek_request(&dto, InferenceLimits::deepseek_default(), &[false]).unwrap();
+        assert_eq!(body["input"], json!([original]));
+        assert_eq!(dto.input[0].0, original);
+    }
+    for original in [
+        json!({"type":"reasoning","content":[]}),
+        json!({"type":"reasoning","content":[],"encrypted_content":null}),
+    ] {
+        let dto = ResponsesRequest {
+            input: vec![Item(original.clone())],
+            ..request()
+        };
+        assert_eq!(
+            deepseek_request(&dto, InferenceLimits::deepseek_default(), &[false]).unwrap()["input"],
+            json!([original])
+        );
+    }
 }
 
 #[test]

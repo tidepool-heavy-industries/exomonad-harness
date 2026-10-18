@@ -33,3 +33,16 @@ Use `Item::user_text` for ordinary authored user text in production and tests.
 Keep raw `Item` JSON for actual provider wire payloads and deliberate malformed
 controls. Exercise valid fixtures through the real context projection so item
 classification or provenance refusals cannot mask the invariant under test.
+
+# Provider response replay
+
+Provider provenance comes from issued requests and retained response ownership,
+not from a familiar JSON field name. Interpret optional response metadata within
+that provider's dialect; preserve the original evidence and keep cross-provider
+compatibility checks in their owning projection boundary.
+
+For replay changes, exercise streamed response parsing, Store persistence, a tool
+outcome, and the next prepared request together. Include sanitized observed wire
+shapes as well as minimal documented examples: a fixture that omits optional
+metadata cannot establish that a real response can be replayed. Cover tool
+failures and reopen histories, and retain incompatible-provider refusal controls.

@@ -3,12 +3,15 @@
 #[path = "support/deepseek_http.rs"]
 mod http_fixture;
 
+use async_trait::async_trait;
 use harness::{
-    engine::EngineConfig,
+    context::{ContextError, ContextProjectionTarget, ContextReplayRejection},
+    engine::{Engine, EngineConfig},
     invocation::{CellBudget, Invocation, InvocationOptions, Limits, Outcome, Receipt, Step},
     item::Item,
     model::{AgentPath, CallId, Effort},
-    store::Store,
+    provider::{Provider, ProviderError, ToolFailure},
+    store::{Store, StoreError, TerminalOutcome},
     transport::{
         Auth, CredentialReference, InferenceLimits, NativeTransportAdmission,
         NativeTransportContract, RequestFailure, ResponsesClient, ResponsesProtocol,
@@ -121,6 +124,27 @@ fn reasoning() -> Value {
     // Includes the empty summary present in the official response example.
     json!({"type":"reasoning","id":"reasoning-1","status":"completed","summary":[],
         "content":[{"type":"reasoning_text","text":REASONING}]})
+}
+
+fn observed_reasoning() -> Value {
+    let mut item = reasoning();
+    // Sanitized shape observed from the official Responses route, including
+    // its nonempty metadata field. The value does not establish provenance.
+    item["encrypted_content"] = json!("4a66e889-79cb-419b-976a-572a9c63fbc8-0");
+    item
+}
+
+struct NoTools;
+
+#[async_trait]
+impl Provider for NoTools {
+    fn tools(&self) -> Vec<Value> {
+        vec![]
+    }
+
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        panic!("reopened history must not execute the settled tool again")
+    }
 }
 
 fn assistant(text: &str) -> Value {
@@ -251,10 +275,21 @@ async fn documented_plaintext_completion_survives_http_fragmentation_and_durable
 
 #[tokio::test]
 async fn bounded_invocation_dispatches_exact_unicode_then_replays_canonical_function_history() {
+    canonical_function_history(false).await;
+}
+
+#[tokio::test]
+async fn observed_reasoning_survives_tool_refusal_next_dispatch_and_store_reopen() {
+    canonical_function_history(true).await;
+}
+
+async fn canonical_function_history(refused: bool) {
     let mut server = LocalResponses::start().await;
     let files = Files::new();
-    let store = Arc::new(Store::memory().unwrap());
-    let client = ResponsesClient::new(files.auth(&server.endpoint));
+    let database = files.0.join("callback-history.sqlite");
+    let store = Arc::new(Store::open(&database).unwrap());
+    let auth = files.auth(&server.endpoint);
+    let client = ResponsesClient::new(auth.clone());
     let tool = json!({"type":"function","name":"echo","strict":true,
         "parameters":{"type":"object","properties":{"source":{"type":"string"}},
             "required":["source"],"additionalProperties":false}});
@@ -287,8 +322,13 @@ async fn bounded_invocation_dispatches_exact_unicode_then_replays_canonical_func
         "bounded synchronous tools retain ordinary arguments"
     );
     let call = json!({"type":"function_call","id":"call-item","status":"completed", "call_id":"echo-1", "name":"echo", "arguments":json!({"source":UNICODE}).to_string()});
+    let reasoning = if refused {
+        observed_reasoning()
+    } else {
+        reasoning()
+    };
     first.respond(HttpReply::fragmented_sse(
-        completed("with-call", &[reasoning(), call.clone()]),
+        completed("with-call", &[reasoning.clone(), call.clone()]),
         &[1, 3, 2],
     ));
     let Step::Callback(callback) = tokio::time::timeout(Duration::from_secs(5), invocation.next())
@@ -300,7 +340,17 @@ async fn bounded_invocation_dispatches_exact_unicode_then_replays_canonical_func
     assert_eq!(callback.name, "echo");
     assert_eq!(callback.arguments, json!({"source":UNICODE}));
     let operation = callback.operation.clone();
-    callback.complete(Ok(json!({"echo":UNICODE}))).unwrap();
+    let failure = json!({"kind":"compile_error","detail":"Not in scope: missingValue"});
+    callback
+        .complete(if refused {
+            Err(ToolFailure::with_metadata(
+                "Haskell compilation refused",
+                failure.clone(),
+            ))
+        } else {
+            Ok(json!({"echo":UNICODE}))
+        })
+        .unwrap();
     let second = next_http(&mut server, &mut invocation).await;
     let body = assert_deepseek_request(&second.captured);
     let input = body["input"].as_array().unwrap();
@@ -309,7 +359,7 @@ async fn bounded_invocation_dispatches_exact_unicode_then_replays_canonical_func
             .iter()
             .filter(|item| item["type"] == "reasoning")
             .collect::<Vec<_>>(),
-        vec![&reasoning()]
+        vec![&reasoning]
     );
     assert_eq!(
         input
@@ -324,10 +374,21 @@ async fn bounded_invocation_dispatches_exact_unicode_then_replays_canonical_func
         .collect::<Vec<_>>();
     assert_eq!(outputs.len(), 1);
     assert_eq!(outputs[0]["call_id"], "echo-1");
-    assert_eq!(
-        serde_json::from_str::<Value>(outputs[0]["output"].as_str().unwrap()).unwrap(),
-        json!({"echo":UNICODE})
-    );
+    let output = serde_json::from_str::<Value>(outputs[0]["output"].as_str().unwrap()).unwrap();
+    if refused {
+        assert_eq!(output["failure"], failure);
+        assert_eq!(output["error"], "tool failed: Haskell compilation refused");
+        assert!(matches!(
+            store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .unwrap()
+                .terminal,
+            TerminalOutcome::Failure(_)
+        ));
+    } else {
+        assert_eq!(output, json!({"echo":UNICODE}));
+    }
     second.respond(HttpReply::fragmented_sse(
         completed("after-call", &[assistant("done")]),
         &[2, 1, 5],
@@ -349,6 +410,78 @@ async fn bounded_invocation_dispatches_exact_unicode_then_replays_canonical_func
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].operation, operation);
     assert!(receipt.transcript.iter().any(|item| item.0 == call));
+    assert!(receipt.transcript.iter().any(|item| item.0 == reasoning));
+    let head = receipt.requests.last().unwrap().clone();
+    drop(invocation);
+    drop(store);
+
+    let reopened = Arc::new(Store::open(&database).unwrap());
+    let identity = reopened.standalone_identity(operation.origin.actor().clone());
+    let foreign = ContextProjectionTarget::component(
+        "deepseek-flash",
+        ResponsesRoute::ChatGptPlan,
+        ResponsesProtocol::Standard,
+    );
+    assert!(matches!(
+        reopened.preflight_context_target(&head, &identity, &foreign),
+        Err(StoreError::Context(ContextError::Replay(
+            ContextReplayRejection::IncompatibleTransport
+        )))
+    ));
+    let mut resumed_config = config(vec![]);
+    resumed_config.agent = operation.origin.actor().clone();
+    let engine = Engine::<DeepSeekAuth, _, _>::with_transport(
+        ResponsesClient::new(auth),
+        reopened.clone(),
+        Arc::new(JobScheduler::new(1).unwrap()),
+        Arc::new(NoTools),
+        resumed_config,
+    );
+    let (_cancel, cancellation) = tokio::sync::watch::channel(false);
+    let (_incoming, incoming) = tokio::sync::mpsc::unbounded_channel();
+    let mut resumed = Box::pin(engine.run(
+        Some(head),
+        vec![Item::user_text("continue")],
+        cancellation,
+        incoming,
+    ));
+    let third = tokio::select! {
+        result = &mut resumed => panic!("reopened history ended before dispatch: {result:?}"),
+        request = server.next() => request,
+    };
+    let body = assert_deepseek_request(&third.captured);
+    let replayed = body["input"].as_array().unwrap();
+    assert_eq!(
+        replayed
+            .iter()
+            .filter(|item| item["type"] == "reasoning")
+            .collect::<Vec<_>>(),
+        vec![&reasoning]
+    );
+    assert_eq!(
+        replayed
+            .iter()
+            .filter(|item| item["type"] == "function_call")
+            .collect::<Vec<_>>(),
+        vec![&call]
+    );
+    assert_eq!(
+        replayed
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .map(|item| serde_json::from_str::<Value>(item["output"].as_str().unwrap()).unwrap())
+            .collect::<Vec<_>>(),
+        vec![output]
+    );
+    third.respond(HttpReply::fragmented_sse(
+        completed("reopened", &[assistant("continued")]),
+        &[3, 1, 2],
+    ));
+    let completion = tokio::time::timeout(Duration::from_secs(5), resumed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(completion.transcript.iter().any(|item| item.0 == reasoning));
     server.finish().await;
 }
 
