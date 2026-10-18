@@ -145,7 +145,7 @@ struct RequestBody<'a> {
     instructions: Option<&'a str>,
     input: Cow<'a, [crate::item::Item]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<RequestTools>,
+    tools: Option<[HostNamespace<'a>; 1]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<ToolChoice>,
     reasoning: Reasoning,
@@ -157,10 +157,14 @@ struct RequestBody<'a> {
     include: [&'static str; 1],
 }
 
+// Keep the former JSON object's sorted key order in the wire serializer.
 #[derive(Serialize)]
-#[serde(untagged)]
-enum RequestTools {
-    Host(Vec<Value>),
+struct HostNamespace<'a> {
+    description: &'static str,
+    name: &'static str,
+    tools: Vec<&'a Value>,
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 #[derive(Serialize)]
@@ -242,7 +246,7 @@ fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, Tra
             .as_ref()
             .is_none_or(|allowed| allowed.iter().any(|name| tool["name"] == name.as_str()))
         {
-            tools.push(tool.clone());
+            tools.push(tool);
         }
     }
     let has_tools = !tools.is_empty();
@@ -250,7 +254,12 @@ fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, Tra
         model: &request.model,
         instructions: (!request.instructions.is_empty()).then_some(request.instructions.as_str()),
         input,
-        tools: has_tools.then(|| RequestTools::Host(vec![serde_json::json!({"type":"namespace","name":"functions","description":"Exomonad host tools","tools":tools})])),
+        tools: has_tools.then_some([HostNamespace {
+            description: "Exomonad host tools",
+            name: "functions",
+            tools,
+            kind: "namespace",
+        }]),
         tool_choice: has_tools.then_some(ToolChoice("auto")),
         reasoning: Reasoning {
             effort: crate::item::Item::effective_effort(&request.input, request.pinned_effort),
@@ -1081,6 +1090,127 @@ mod tests {
         request.tools_allowed = Some(vec![]);
         assert!(request_body(&request).unwrap().get("tool_choice").is_none());
         assert!(request_body(&request).unwrap().get("tools").is_none());
+    }
+
+    #[test]
+    fn borrowed_namespace_matches_old_wire_bytes_and_limit_projection() {
+        // Previous body schema: its tools are independently built owned JSON.
+        #[derive(Serialize)]
+        struct PreviousBody<'a> {
+            model: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            instructions: Option<&'a str>,
+            input: &'a [Item],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            tools: Option<Vec<Value>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            tool_choice: Option<ToolChoice>,
+            reasoning: Reasoning,
+            stream: bool,
+            store: bool,
+            prompt_cache_key: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            prompt_cache_options: Option<&'a super::super::PromptCacheComparison>,
+            include: [&'static str; 1],
+        }
+        let advertised = vec![
+            json!({"type":"function","name":"a","description":"schema λ","strict":true,"parameters":{"type":"object","properties":{"text":{"type":"string","description":"nested λ"}},"required":["text"],"additionalProperties":false}}),
+            json!({"type":"custom","name":"b","description":"script λ","extra":{"unknown":[null,1,"opaque"]}}),
+        ];
+        for (allowed, indices) in [
+            (None, vec![0, 1]),
+            (Some(vec![]), vec![]),
+            (Some(vec!["b".into()]), vec![1]),
+            (Some(vec!["b".into(), "a".into()]), vec![0, 1]),
+            (
+                Some(vec!["b".into(), "b".into(), "unknown".into()]),
+                vec![1],
+            ),
+        ] {
+            let request = ResponsesRequest {
+                input: vec![
+                    Item::user_text("hello λ"),
+                    Item(
+                        json!({"type":"reasoning","encrypted_content":"opaque\u{0}","unknown":{"retained":true}}),
+                    ),
+                    Item(
+                        json!({"type":"function_call","call_id":"same","name":"a","arguments":"{}"}),
+                    ),
+                ],
+                instructions: "policy".into(),
+                tools: advertised.clone().into(),
+                tools_allowed: allowed,
+                model: "gpt-6-sol".into(),
+                pinned_effort: Effort::Low,
+                session_id: "session".into(),
+                prompt_cache_comparison: None,
+            };
+            let selected: Vec<_> = indices
+                .into_iter()
+                .map(|index| advertised[index].clone())
+                .collect();
+            let has_tools = !selected.is_empty();
+            let previous = PreviousBody {
+                model: &request.model, instructions: Some(&request.instructions), input: &request.input,
+                tools: has_tools.then(|| vec![json!({"type":"namespace","name":"functions","description":"Exomonad host tools","tools":selected})]),
+                tool_choice: has_tools.then_some(ToolChoice("auto")),
+                reasoning: Reasoning { effort: Effort::Low, summary: "auto" }, stream: true, store: false,
+                prompt_cache_key: request.session_id.cache_key(), prompt_cache_options: None,
+                include: ["reasoning.encrypted_content"],
+            };
+            let actual = normalized_request(&request).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&actual).unwrap(),
+                serde_json::to_vec(&previous).unwrap()
+            );
+            assert_eq!(
+                request_body(&request).unwrap(),
+                serde_json::to_value(&previous).unwrap()
+            );
+            // The native explicit-limit branch still converts through Value.
+            let mut actual_limit = serde_json::to_value(&actual).unwrap();
+            let mut previous_limit = serde_json::to_value(&previous).unwrap();
+            actual_limit["max_output_tokens"] = 4096.into();
+            previous_limit["max_output_tokens"] = 4096.into();
+            assert_eq!(
+                serde_json::to_vec(&actual_limit).unwrap(),
+                serde_json::to_vec(&previous_limit).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_namespace_preserves_all_tools_validation_and_refusal_order() {
+        let mut request = ResponsesRequest {
+            input: vec![Item::user_text("hello")],
+            instructions: String::new(),
+            tools: vec![json!({"type":"unsupported","name":"excluded"})].into(),
+            tools_allowed: Some(vec![]),
+            model: "gpt-6-sol".into(),
+            pinned_effort: Effort::None,
+            session_id: "session".into(),
+            prompt_cache_comparison: None,
+        };
+        assert!(matches!(
+            normalized_request(&request),
+            Err(TransportError::UnsupportedSemantics(
+                super::super::UnsupportedSemantics::ReasoningEffort
+            ))
+        ));
+        request.pinned_effort = Effort::Low;
+        assert!(
+            matches!(normalized_request(&request), Err(TransportError::Stream(cause)) if cause == "ChatGPT plan route requires function or custom host tools")
+        );
+        request.input = vec![Item(
+            json!({"type":"message","role":"system","content":"policy"}),
+        )];
+        assert!(
+            matches!(normalized_request(&request), Err(TransportError::Stream(cause)) if cause == "ChatGPT plan input requires instructions or developer messages")
+        );
+        request.tools = vec![json!({"type":"function","name":"excluded","strict":false})].into();
+        assert!(
+            matches!(normalized_request(&request), Err(TransportError::Stream(cause)) if cause == "all function tools must be strict")
+        );
     }
 
     #[test]
