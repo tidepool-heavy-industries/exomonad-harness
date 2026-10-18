@@ -854,26 +854,32 @@ async fn read_response_observed(
                     .summary()
                     .sse_event(super::EventKind::from_provider(Some(name)));
             }
-            match assembly.accept(&frame.data, token, account, observation.summary()) {
-                Ok(events) => {
-                    for event in events {
-                        observation.visible_event(&event);
-                        if let Some(sender) = &sink {
-                            let _ = sender.send(event).await;
-                        }
-                    }
+            match assembly.advance(&frame.data, token, account, observation.summary()) {
+                Ok(NativeAdvance::Progress { pending, events }) => {
+                    assembly = pending;
+                    publish_events(events, &sink, observation).await;
+                }
+                Ok(NativeAdvance::Complete { events, turn }) => {
+                    publish_events(events, &sink, observation).await;
+                    break 'body (Ok(turn), ResponseEnd::ProviderTerminal);
+                }
+                Ok(NativeAdvance::Stopped(stop)) => {
+                    break 'body (
+                        Err(stop.into_error(Some(observation.summary()))),
+                        ResponseEnd::ProviderTerminal,
+                    );
                 }
                 Err(error) => {
+                    // Wire completion and successful local item validation are
+                    // independent. Retain an observed native terminal even when
+                    // its final item projection is malformed.
                     let end = if observation.summary().terminal.is_some() {
                         ResponseEnd::ProviderTerminal
                     } else {
                         ResponseEnd::ProtocolError
                     };
-                    break 'body (Err(error), end);
+                    break 'body (Err(error.into_error()), end);
                 }
-            }
-            if assembly.is_complete() {
-                break 'body (assembly.finish(), ResponseEnd::ProviderTerminal);
             }
         }
         if let Some(error) = framing_error {
@@ -884,10 +890,34 @@ async fn read_response_observed(
     result
 }
 
+async fn publish_events(
+    events: Vec<StreamEvent>,
+    sink: &Option<tokio::sync::mpsc::Sender<StreamEvent>>,
+    observation: &mut ObservationGuard,
+) {
+    for event in events {
+        observation.visible_event(&event);
+        if let Some(sender) = sink {
+            let _ = sender.send(event).await;
+        }
+    }
+}
+
 // Both protocols share framing, observation, admission and cancellation owners.
 enum ProviderAssembly {
     Responses(ResponseAssembly),
     Interactions(super::interactions::Assembly),
+}
+enum NativeAdvance {
+    Progress {
+        pending: ProviderAssembly,
+        events: Vec<StreamEvent>,
+    },
+    Complete {
+        events: Vec<StreamEvent>,
+        turn: ResponsesTurn,
+    },
+    Stopped(super::assembly::DeclaredStop),
 }
 impl ProviderAssembly {
     fn new(route: ResponsesRoute) -> Self {
@@ -896,30 +926,31 @@ impl ProviderAssembly {
             _ => Self::Responses(Default::default()),
         }
     }
-    fn accept(
-        &mut self,
+    fn advance(
+        mut self,
         data: &str,
         token: &str,
         account: &str,
         observation: &mut super::TransportObservation,
-    ) -> Result<Vec<StreamEvent>, TransportError> {
-        match self {
-            Self::Responses(assembly) => assembly
-                .accept_observed(data, token, account, Some(observation))
-                .map(|event| event.into_iter().collect()),
-            Self::Interactions(assembly) => assembly.accept(data, token, account, observation),
-        }
-    }
-    fn is_complete(&self) -> bool {
-        match self {
-            Self::Responses(a) => a.is_complete(),
-            Self::Interactions(a) => a.is_complete(),
-        }
-    }
-    fn finish(self) -> Result<ResponsesTurn, TransportError> {
-        match self {
-            Self::Responses(a) => a.finish(),
-            Self::Interactions(a) => a.finish(),
+    ) -> Result<NativeAdvance, super::assembly::ProtocolFault> {
+        use super::assembly::AssemblyAdvance;
+        let advance = match &mut self {
+            Self::Responses(assembly) => assembly.advance(data, token, account, Some(observation)),
+            Self::Interactions(assembly) => assembly.advance(data, token, account, observation),
+        }?;
+        match advance {
+            AssemblyAdvance::Progress(events) => Ok(NativeAdvance::Progress {
+                pending: self,
+                events,
+            }),
+            AssemblyAdvance::Stopped(stop) => Ok(NativeAdvance::Stopped(stop)),
+            AssemblyAdvance::Complete(events) => {
+                let turn = match self {
+                    Self::Responses(assembly) => assembly.finish_complete(),
+                    Self::Interactions(assembly) => assembly.finish_complete(),
+                }?;
+                Ok(NativeAdvance::Complete { events, turn })
+            }
         }
     }
 }

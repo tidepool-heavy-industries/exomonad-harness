@@ -10,7 +10,10 @@ fn observation() -> TransportObservation {
     TransportObservation::new(ResponseEnd::ProviderTerminal)
 }
 fn send(assembly: &mut Assembly, event: Value) -> Result<Vec<StreamEvent>, TransportError> {
-    assembly.accept(&event.to_string(), "", "", &mut observation())
+    assembly
+        .advance(&event.to_string(), "", "", &mut observation())
+        .map_err(ProtocolFault::into_error)?
+        .into_events(None)
 }
 fn created() -> Assembly {
     let mut assembly = Assembly::default();
@@ -75,7 +78,7 @@ fn late_signature_retains_initial_summary_and_exact_native_step() {
         json!({"type":"thought","signature":"opaque+/=","summary":[{"type":"text","text":"initial λ"},{"type":"text","text":"second"}]})
     );
     terminal(&mut assembly, "completed");
-    assert_eq!(assembly.finish().unwrap().items[0], *done.item());
+    assert_eq!(assembly.finish_complete().unwrap().items[0], *done.item());
 }
 
 #[test]
@@ -85,7 +88,7 @@ fn signature_without_summary_survives_replay_without_inventing_summary() {
     send(&mut assembly, json!({"event_type":"step.delta","index":0,"delta":{"type":"thought_signature","signature":"opaque"}})).unwrap();
     stop(&mut assembly, 0);
     terminal(&mut assembly, "completed");
-    let item = assembly.finish().unwrap().items.remove(0);
+    let item = assembly.finish_complete().unwrap().items.remove(0);
     assert_eq!(item.0["summary"], json!([]));
     let mut request = request_fixture();
     request.input.push(item);
@@ -123,7 +126,7 @@ fn arguments_fragments_and_out_of_order_stops_release_calls_in_provider_order() 
         .collect::<Vec<_>>();
     assert_eq!(indices, vec![0, 1]);
     terminal(&mut assembly, "requires_action");
-    let turn = assembly.finish().unwrap();
+    let turn = assembly.finish_complete().unwrap();
     assert_eq!(
         turn.items[0].tool_call().unwrap().unwrap().input,
         crate::item::ToolInput::Function(json!({"nested":{"λ":[1,true]}}))
@@ -163,12 +166,12 @@ fn incomplete_and_gapped_steps_never_produce_a_successful_turn() {
     let mut unfinished = created();
     start(&mut unfinished, 0, json!({"type":"model_output"}));
     assert!(send(&mut unfinished, json!({"event_type":"interaction.completed","interaction":{"id":"turn-λ","status":"completed"}})).is_err());
-    assert!(unfinished.finish().is_err());
+    assert!(unfinished.finish_complete().is_err());
     let mut gap = created();
     start(&mut gap, 1, json!({"type":"model_output","content":[]}));
     assert!(stop(&mut gap, 1).is_empty());
     terminal(&mut gap, "completed");
-    assert!(gap.finish().is_err());
+    assert!(gap.finish_complete().is_err());
     let mut no_terminal = created();
     start(
         &mut no_terminal,
@@ -176,7 +179,7 @@ fn incomplete_and_gapped_steps_never_produce_a_successful_turn() {
         json!({"type":"model_output","content":[]}),
     );
     stop(&mut no_terminal, 0);
-    assert!(no_terminal.finish().is_err());
+    assert!(no_terminal.finish_complete().is_err());
 }
 
 #[test]
@@ -275,7 +278,7 @@ fn requires_action_needs_a_call_and_failed_status_is_not_success() {
     for status in ["failed", "cancelled", "incomplete"] {
         let mut assembly = created();
         assert!(send(&mut assembly,json!({"event_type":"interaction.completed","interaction":{"id":"turn-λ","status":status}})).is_err());
-        assert!(assembly.finish().is_err());
+        assert!(assembly.finish_complete().is_err());
     }
 }
 

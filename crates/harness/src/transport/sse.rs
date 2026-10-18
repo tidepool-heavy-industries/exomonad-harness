@@ -1,4 +1,7 @@
-use super::{ProviderStreamFailureEvent, ResponsesTurn, TransportError, Usage};
+use super::{
+    ProviderStreamFailureEvent, ResponsesTurn, TransportError, Usage,
+    assembly::{AssemblyAdvance, DeclaredStop, ProtocolFault},
+};
 use crate::item::Item;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -69,16 +72,7 @@ impl ResponseAssembly {
     /// Returns a live event for the loop, while retaining completed items for
     /// the final turn. The caller is responsible for SSE framing.
     pub fn accept(&mut self, data: &str) -> Result<Option<StreamEvent>, TransportError> {
-        self.accept_with_credentials(data, "", "")
-    }
-
-    pub(super) fn accept_with_credentials(
-        &mut self,
-        data: &str,
-        token: &str,
-        account: &str,
-    ) -> Result<Option<StreamEvent>, TransportError> {
-        self.accept_observed(data, token, account, None)
+        self.accept_observed(data, "", "", None)
     }
 
     pub(super) fn accept_observed(
@@ -88,8 +82,21 @@ impl ResponseAssembly {
         account: &str,
         mut observation: Option<&mut super::TransportObservation>,
     ) -> Result<Option<StreamEvent>, TransportError> {
-        let event: Value = serde_json::from_str(data)
-            .map_err(|_| TransportError::Stream("invalid SSE JSON".into()))?;
+        self.advance(data, token, account, observation.as_deref_mut())
+            .map_err(ProtocolFault::into_error)?
+            .into_events(observation)
+            .map(|events| events.into_iter().next())
+    }
+
+    pub(super) fn advance(
+        &mut self,
+        data: &str,
+        token: &str,
+        account: &str,
+        mut observation: Option<&mut super::TransportObservation>,
+    ) -> Result<AssemblyAdvance, ProtocolFault> {
+        let event: Value =
+            serde_json::from_str(data).map_err(|_| ProtocolFault::Invalid("invalid SSE JSON"))?;
         if let Some(observation) = observation.as_deref_mut() {
             observation.event(super::EventKind::from_provider(
                 event.get("type").and_then(Value::as_str),
@@ -111,9 +118,9 @@ impl ResponseAssembly {
                     .get("response")
                     .and_then(|response| response.get("id"))
                     .and_then(Value::as_str)
-                    .ok_or_else(|| TransportError::Stream("created response missing id".into()))?;
+                    .ok_or_else(|| ProtocolFault::Invalid("created response missing id"))?;
                 if self.response_id.as_deref().is_some_and(|prior| prior != id) {
-                    return Err(TransportError::Stream("response identity changed".into()));
+                    return Err(ProtocolFault::Invalid("response identity changed"));
                 }
                 self.response_id = Some(id.to_owned());
                 if let Some(observation) = observation.as_deref_mut() {
@@ -121,7 +128,7 @@ impl ResponseAssembly {
                     observation.response_created_id = Some(id);
                     observation.metadata_truncated |= truncated;
                 }
-                Ok(None)
+                Ok(AssemblyAdvance::Progress(Vec::new()))
             }
             Some("response.output_item.added") => {
                 let item = &event["item"];
@@ -138,17 +145,17 @@ impl ResponseAssembly {
                         }
                     }
                 }
-                Ok(None)
+                Ok(AssemblyAdvance::Progress(Vec::new()))
             }
             Some("response.output_item.done") => {
                 let item = event
                     .get("item")
                     .cloned()
-                    .ok_or_else(|| TransportError::Stream("missing done item".into()))?;
+                    .ok_or_else(|| ProtocolFault::Invalid("missing done item"))?;
                 let output_index = event
                     .get("output_index")
                     .and_then(Value::as_u64)
-                    .ok_or(TransportError::MissingOutputIndex)?;
+                    .ok_or(ProtocolFault::MissingOutputIndex)?;
                 let done = CompletedOutputItem {
                     item: Item(item),
                     output_index,
@@ -156,14 +163,16 @@ impl ResponseAssembly {
                 };
                 if let Some(previous) = self.items.get(&output_index) {
                     if previous != done.item() {
-                        return Err(TransportError::ConflictingOutputIndex {
+                        return Err(ProtocolFault::ConflictingOutputIndex {
                             index: output_index,
                         });
                     }
                 } else {
                     self.items.insert(output_index, done.item.clone());
                 }
-                Ok(Some(StreamEvent::CompletedItem(done)))
+                Ok(AssemblyAdvance::Progress(vec![StreamEvent::CompletedItem(
+                    done,
+                )]))
             }
             Some(
                 kind @ ("response.output_text.delta"
@@ -183,50 +192,54 @@ impl ResponseAssembly {
                             None
                         }
                     })
-                    .ok_or_else(|| TransportError::Stream("delta missing item_id".into()))?;
-                Ok(event
-                    .get("delta")
-                    .and_then(Value::as_str)
-                    .map(|text| StreamEvent::Delta {
-                        item_id: item_id.to_owned(),
-                        channel: match kind {
-                            "response.output_text.delta" => OutputChannel::Assistant,
-                            "response.reasoning_summary_text.delta" => {
-                                OutputChannel::ReasoningSummary
-                            }
-                            "response.reasoning_text.delta" => OutputChannel::Reasoning,
-                            "response.function_call_arguments.delta" => {
-                                OutputChannel::ToolArguments
-                            }
-                            "response.custom_tool_call_input.delta" => OutputChannel::ToolInput,
-                            "response.refusal.delta" => OutputChannel::Refusal,
-                            _ => unreachable!("matched channel"),
-                        },
-                        index: event
-                            .get("content_index")
-                            .or_else(|| event.get("summary_index"))
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0),
-                        text: text.to_owned(),
-                        tool_name: matches!(
-                            kind,
-                            "response.function_call_arguments.delta"
-                                | "response.custom_tool_call_input.delta"
-                        )
-                        .then(|| self.tool_names.get(item_id).cloned())
-                        .flatten(),
-                    }))
+                    .ok_or_else(|| ProtocolFault::Invalid("delta missing item_id"))?;
+                Ok(AssemblyAdvance::Progress(
+                    event
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .map(|text| StreamEvent::Delta {
+                            item_id: item_id.to_owned(),
+                            channel: match kind {
+                                "response.output_text.delta" => OutputChannel::Assistant,
+                                "response.reasoning_summary_text.delta" => {
+                                    OutputChannel::ReasoningSummary
+                                }
+                                "response.reasoning_text.delta" => OutputChannel::Reasoning,
+                                "response.function_call_arguments.delta" => {
+                                    OutputChannel::ToolArguments
+                                }
+                                "response.custom_tool_call_input.delta" => OutputChannel::ToolInput,
+                                "response.refusal.delta" => OutputChannel::Refusal,
+                                _ => unreachable!("matched channel"),
+                            },
+                            index: event
+                                .get("content_index")
+                                .or_else(|| event.get("summary_index"))
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0),
+                            text: text.to_owned(),
+                            tool_name: matches!(
+                                kind,
+                                "response.function_call_arguments.delta"
+                                    | "response.custom_tool_call_input.delta"
+                            )
+                            .then(|| self.tool_names.get(item_id).cloned())
+                            .flatten(),
+                        })
+                        .into_iter()
+                        .collect(),
+                ))
             }
             Some("response.completed") => {
                 let response = event
                     .get("response")
-                    .ok_or_else(|| TransportError::Stream("missing response".into()))?;
+                    .ok_or_else(|| ProtocolFault::Invalid("missing response"))?;
                 let id = response
                     .get("id")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| TransportError::Stream("missing response id".into()))?;
+                    .ok_or_else(|| ProtocolFault::Invalid("missing response id"))?;
                 if self.response_id.as_deref().is_some_and(|prior| prior != id) {
-                    return Err(TransportError::Stream("response identity changed".into()));
+                    return Err(ProtocolFault::Invalid("response identity changed"));
                 }
                 // A nonempty terminal output array carries authoritative output
                 // positions, including items whose streamed events were absent.
@@ -243,14 +256,14 @@ impl ResponseAssembly {
                             .get(&(index as u64))
                             .is_some_and(|prior| prior != &item)
                         {
-                            return Err(TransportError::ConflictingOutputIndex {
+                            return Err(ProtocolFault::ConflictingOutputIndex {
                                 index: index as u64,
                             });
                         }
                         self.items.insert(index as u64, item);
                     }
                     if self.items.len() != output.len() {
-                        return Err(TransportError::IncompleteOutputIndices {
+                        return Err(ProtocolFault::IncompleteOutputIndices {
                             index: output.len() as u64,
                         });
                     }
@@ -283,18 +296,18 @@ impl ResponseAssembly {
                     "provider completion diagnostics"
                 );
                 self.completed = Some((id.to_owned(), Usage::from_response_usage(response)));
-                Ok(None)
+                Ok(AssemblyAdvance::Complete(Vec::new()))
             }
             Some("response.incomplete") => {
                 let response = event
                     .get("response")
-                    .ok_or_else(|| TransportError::Stream("missing response".into()))?;
+                    .ok_or_else(|| ProtocolFault::Invalid("missing response"))?;
                 let id = response
                     .get("id")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| TransportError::Stream("missing response id".into()))?;
+                    .ok_or_else(|| ProtocolFault::Invalid("missing response id"))?;
                 if self.response_id.as_deref().is_some_and(|prior| prior != id) {
-                    return Err(TransportError::Stream("response identity changed".into()));
+                    return Err(ProtocolFault::Invalid("response identity changed"));
                 }
                 let reason = response
                     .get("incomplete_details")
@@ -304,15 +317,11 @@ impl ResponseAssembly {
                 let (response_id, truncated) = super::observation::metadata(id, token, account);
                 if let Some(observation) = observation.as_deref_mut() {
                     observation.metadata_truncated |= truncated;
-                    observation.terminal = Some(super::ResponseTerminal::Incomplete {
-                        response_id: response_id.clone(),
-                        reason,
-                    });
                 }
-                Err(TransportError::ResponseIncomplete {
+                Ok(AssemblyAdvance::Stopped(DeclaredStop::Incomplete {
                     response_id,
                     reason,
-                })
+                }))
             }
             Some(kind @ ("response.failed" | "error")) => {
                 let response_failed = kind == "response.failed";
@@ -321,13 +330,6 @@ impl ResponseAssembly {
                 } else {
                     ProviderStreamFailureEvent::Error
                 };
-                if let Some(observation) = observation.as_deref_mut() {
-                    observation.terminal = Some(if response_failed {
-                        super::ResponseTerminal::ResponseFailed
-                    } else {
-                        super::ResponseTerminal::Error
-                    });
-                }
                 let nested_error = if response_failed {
                     event
                         .get("response")
@@ -346,7 +348,7 @@ impl ResponseAssembly {
                             }
                         })
                 };
-                Err(TransportError::ProviderStreamFailure {
+                Ok(AssemblyAdvance::Stopped(DeclaredStop::Failed {
                     event: failure,
                     diagnostic: super::http_error::diagnostic(
                         field("code"),
@@ -358,20 +360,40 @@ impl ResponseAssembly {
                         token,
                         account,
                     ),
-                })
+                }))
             }
-            _ => Ok(None),
+            _ => Ok(AssemblyAdvance::Progress(Vec::new())),
         }
     }
 
-    pub fn finish(self) -> Result<ResponsesTurn, TransportError> {
-        let (response_id, usage) = self.completed.ok_or(TransportError::IncompleteResponse(
-            super::StreamInterruption::MissingCompletion,
-        ))?;
+    pub fn finish(mut self) -> Result<ResponsesTurn, TransportError> {
+        let (response_id, usage) =
+            self.completed
+                .take()
+                .ok_or(TransportError::IncompleteResponse(
+                    super::StreamInterruption::MissingCompletion,
+                ))?;
+        self.finish_items(response_id, usage)
+            .map_err(ProtocolFault::into_error)
+    }
+
+    pub(super) fn finish_complete(mut self) -> Result<ResponsesTurn, ProtocolFault> {
+        let (response_id, usage) = self
+            .completed
+            .take()
+            .ok_or(ProtocolFault::Invalid("missing native completion"))?;
+        self.finish_items(response_id, usage)
+    }
+
+    fn finish_items(
+        self,
+        response_id: String,
+        usage: Usage,
+    ) -> Result<ResponsesTurn, ProtocolFault> {
         let mut items = Vec::with_capacity(self.items.len());
         for (expected, (index, item)) in self.items.into_iter().enumerate() {
             if index != expected as u64 {
-                return Err(TransportError::IncompleteOutputIndices {
+                return Err(ProtocolFault::IncompleteOutputIndices {
                     index: expected as u64,
                 });
             }
@@ -382,10 +404,6 @@ impl ResponseAssembly {
             items,
             usage,
         })
-    }
-
-    pub(super) fn is_complete(&self) -> bool {
-        self.completed.is_some()
     }
 }
 
@@ -423,7 +441,7 @@ mod tests {
             assert!(
                 matches!(error, TransportError::ResponseIncomplete { response_id, reason } if response_id == "original" && reason == expected)
             );
-            assert!(!assembly.is_complete());
+            assert!(assembly.completed.is_none());
         }
         let mut assembly = ResponseAssembly::default();
         assembly
@@ -958,7 +976,7 @@ mod tests {
             serde_json::json!({"type":"error", "error":{"type":token,"code":format!("{}{}", "λ".repeat(255), token), "param":account, "message":message}, "authorization":token}),
         ] {
             let failure = ResponseAssembly::default()
-                .accept_with_credentials(&packet.to_string(), token, account)
+                .accept_observed(&packet.to_string(), token, account, None)
                 .unwrap_err();
             let TransportError::ProviderStreamFailure {
                 diagnostic: Some(ref diagnostic),

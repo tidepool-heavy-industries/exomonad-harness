@@ -660,7 +660,9 @@ fn malformed_events_remain_protocol_errors_and_incomplete_ids_are_bounded_and_re
         let mut assembly = Assembly::default();
         let mut observed = TransportObservation::new(ResponseEnd::ProtocolError);
         assert!(matches!(
-            assembly.accept(&event.to_string(), KEY, "", &mut observed),
+            assembly
+                .advance(&event.to_string(), KEY, "", &mut observed)
+                .map_err(ProtocolFault::into_error),
             Err(TransportError::Stream(_))
         ));
         assert_eq!(observed.terminal, None);
@@ -669,7 +671,9 @@ fn malformed_events_remain_protocol_errors_and_incomplete_ids_are_bounded_and_re
     let mut observed = TransportObservation::new(ResponseEnd::ProviderTerminal);
     let event = json!({"event_type":"interaction.status_update","interaction_id":format!("{KEY}{}", "λ".repeat(200)),"status":"incomplete"});
     let error = assembly
-        .accept(&event.to_string(), KEY, "", &mut observed)
+        .advance(&event.to_string(), KEY, "", &mut observed)
+        .unwrap()
+        .into_events(Some(&mut observed))
         .unwrap_err();
     let TransportError::ResponseIncomplete {
         response_id,
@@ -694,7 +698,8 @@ proptest! {
         expected.extend(fragments.iter().map(String::as_str));
         let mut assembly = Assembly::default();
         let mut observed = TransportObservation::new(ResponseEnd::ProviderTerminal);
-        let mut send = |event: Value| assembly.accept(&event.to_string(), "", "", &mut observed);
+        let mut send = |event: Value| assembly.advance(&event.to_string(), "", "", &mut observed)
+            .map_err(ProtocolFault::into_error)?.into_events(Some(&mut observed));
         send(created("text")).unwrap();
         send(json!({"event_type":"step.start","index":0,"step":output("initial λ\r\n")})).unwrap();
         let mut visible = String::new();
@@ -707,7 +712,7 @@ proptest! {
         prop_assert_eq!(visible, fragments.concat());
         let emitted = send(json!({"event_type":"step.stop","index":0})).unwrap();
         send(json!({"event_type":"interaction.completed","interaction":{"id":"text","status":"completed"}})).unwrap();
-        let turn = assembly.finish().unwrap();
+        let turn = assembly.finish_complete().unwrap();
         prop_assert_eq!(&turn.items[0].0["gemini_step"], &output(&expected));
         let StreamEvent::CompletedItem(done) = &emitted[0] else { panic!("missing complete item"); };
         prop_assert_eq!(done.item(), &turn.items[0]);

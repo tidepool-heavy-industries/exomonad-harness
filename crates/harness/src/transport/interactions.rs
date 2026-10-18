@@ -2,6 +2,7 @@
 //! The native step is replay authority; the projection never replaces it.
 use super::{
     InferenceLimits, ResponsesRequest, ResponsesTurn, TransportError, UnsupportedSemantics, Usage,
+    assembly::{AssemblyAdvance, DeclaredStop, ProtocolFault},
     sse::{CompletedOutputItem, OutputChannel, StreamEvent},
 };
 use crate::{item::Item, model::Effort};
@@ -10,9 +11,6 @@ use std::collections::{BTreeMap, HashMap};
 
 fn invalid() -> TransportError {
     TransportError::UnsupportedSemantics(UnsupportedSemantics::InputItem)
-}
-fn protocol(message: &'static str) -> TransportError {
-    TransportError::Stream(message.into())
 }
 
 pub(super) fn request(
@@ -67,7 +65,8 @@ pub(super) fn request(
         if let Some(step) = item.0.get("gemini_step") {
             // Context overlays cannot silently change the immutable native step.
             let id = item.0["id"].as_str().ok_or_else(invalid)?;
-            let expected = project(step.clone(), id)?;
+            let expected =
+                project(step.clone(), id).map_err(TransportError::UnsupportedSemantics)?;
             if expected != *item {
                 return Err(invalid());
             }
@@ -171,19 +170,21 @@ fn text_content(content: &Value) -> Result<Vec<Value>, TransportError> {
 }
 
 /// The envelope makes the projection and its exact provider source indivisible.
-fn project(step: Value, display_id: &str) -> Result<Item, TransportError> {
-    let kind = step["type"].as_str().ok_or_else(invalid)?;
+fn project(step: Value, display_id: &str) -> Result<Item, UnsupportedSemantics> {
+    let kind = step["type"]
+        .as_str()
+        .ok_or(UnsupportedSemantics::InputItem)?;
     let mut value = match kind {
         "function_call" => json!({"type":"function_call","id":display_id,
-            "call_id":step["id"].as_str().filter(|s| !s.is_empty()).ok_or_else(invalid)?,
-            "name":step["name"].as_str().filter(|s| !s.is_empty()).ok_or_else(invalid)?,
-            "arguments":step["arguments"].as_object().ok_or_else(invalid)?}),
+            "call_id":step["id"].as_str().filter(|s| !s.is_empty()).ok_or(UnsupportedSemantics::InputItem)?,
+            "name":step["name"].as_str().filter(|s| !s.is_empty()).ok_or(UnsupportedSemantics::InputItem)?,
+            "arguments":step["arguments"].as_object().ok_or(UnsupportedSemantics::InputItem)?}),
         "thought" => {
             if step
                 .get("signature")
                 .is_some_and(|signature| !signature.is_string())
             {
-                return Err(invalid());
+                return Err(UnsupportedSemantics::InputItem);
             }
             let summaries = step
                 .get("summary")
@@ -203,16 +204,18 @@ fn project(step: Value, display_id: &str) -> Result<Item, TransportError> {
                 None => Vec::new(),
                 Some(content) => content
                     .as_array()
-                    .ok_or_else(invalid)?
+                    .ok_or(UnsupportedSemantics::InputItem)?
                     .iter()
                     .map(|part| {
                         if part["type"] != "text" {
-                            return Err(invalid());
+                            return Err(UnsupportedSemantics::InputItem);
                         }
-                        let text = part["text"].as_str().ok_or_else(invalid)?;
+                        let text = part["text"]
+                            .as_str()
+                            .ok_or(UnsupportedSemantics::InputItem)?;
                         Ok(json!({"type":"output_text","text":text}))
                     })
-                    .collect::<Result<Vec<_>, TransportError>>()?,
+                    .collect::<Result<Vec<_>, UnsupportedSemantics>>()?,
             };
             json!({"type":"message","id":display_id,"role":"assistant","content":parts})
         }
@@ -220,6 +223,33 @@ fn project(step: Value, display_id: &str) -> Result<Item, TransportError> {
     };
     value["gemini_step"] = step;
     Ok(Item(value))
+}
+
+#[derive(Clone, Copy)]
+enum InteractionStatus {
+    InProgress,
+    Queued,
+    Completed,
+    RequiresAction,
+    Incomplete,
+    BudgetExceeded,
+    Failed,
+    Cancelled,
+}
+impl InteractionStatus {
+    fn parse(value: Option<&str>) -> Result<Self, ProtocolFault> {
+        match value {
+            Some("in_progress") => Ok(Self::InProgress),
+            Some("queued") => Ok(Self::Queued),
+            Some("completed") => Ok(Self::Completed),
+            Some("requires_action") => Ok(Self::RequiresAction),
+            Some("incomplete") => Ok(Self::Incomplete),
+            Some("budget_exceeded") => Ok(Self::BudgetExceeded),
+            Some("failed") => Ok(Self::Failed),
+            Some("cancelled") => Ok(Self::Cancelled),
+            _ => Err(ProtocolFault::Invalid("unsupported interaction status")),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -238,52 +268,54 @@ pub(super) struct Assembly {
     seen_events: HashMap<String, Value>,
 }
 impl Assembly {
-    fn identity(&mut self, id: &str) -> Result<(), TransportError> {
+    fn identity(&mut self, id: &str) -> Result<(), ProtocolFault> {
         if id.is_empty() || self.id.as_deref().is_some_and(|old| old != id) {
-            return Err(protocol("interaction identity changed"));
+            return Err(ProtocolFault::Invalid("interaction identity changed"));
         }
         self.id = Some(id.into());
         Ok(())
     }
-    pub(super) fn accept(
+    pub(super) fn advance(
         &mut self,
         data: &str,
         token: &str,
         account: &str,
         observation: &mut super::TransportObservation,
-    ) -> Result<Vec<StreamEvent>, TransportError> {
-        let event: Value =
-            serde_json::from_str(data).map_err(|_| protocol("invalid Interactions SSE JSON"))?;
+    ) -> Result<AssemblyAdvance, ProtocolFault> {
+        let event: Value = serde_json::from_str(data)
+            .map_err(|_| ProtocolFault::Invalid("invalid Interactions SSE JSON"))?;
         if let Some(id) = event["event_id"].as_str() {
             if let Some(previous) = self.seen_events.get(id) {
                 return if previous == &event {
-                    Ok(Vec::new())
+                    Ok(AssemblyAdvance::Progress(Vec::new()))
                 } else {
-                    Err(protocol("conflicting Interactions event id"))
+                    Err(ProtocolFault::Invalid("conflicting Interactions event id"))
                 };
             }
             self.seen_events.insert(id.into(), event.clone());
         }
         let kind = event["event_type"]
             .as_str()
-            .ok_or_else(|| protocol("missing Interactions event type"))?;
+            .ok_or_else(|| ProtocolFault::Invalid("missing Interactions event type"))?;
         observation.event(super::EventKind::from_provider(Some(kind)));
         if self.terminal.is_some() {
-            return Err(protocol("event after terminal interaction"));
+            return Err(ProtocolFault::Invalid("event after terminal interaction"));
         }
         let mut events = Vec::new();
         match kind {
-            "interaction.created" => {
-                self.identity(event["interaction"]["id"].as_str().ok_or_else(invalid)?)?
-            }
+            "interaction.created" => self.identity(
+                event["interaction"]["id"]
+                    .as_str()
+                    .ok_or_else(ProtocolFault::invalid_input)?,
+            )?,
             "step.start" => {
                 let index = event["index"]
                     .as_u64()
-                    .ok_or(TransportError::MissingOutputIndex)?;
+                    .ok_or(ProtocolFault::MissingOutputIndex)?;
                 let native = event
                     .get("step")
                     .filter(|s| s.is_object())
-                    .ok_or_else(invalid)?
+                    .ok_or_else(ProtocolFault::invalid_input)?
                     .clone();
                 if self
                     .steps
@@ -296,36 +328,41 @@ impl Assembly {
                     )
                     .is_some()
                 {
-                    return Err(TransportError::ConflictingOutputIndex { index });
+                    return Err(ProtocolFault::ConflictingOutputIndex { index });
                 }
             }
             "step.delta" => {
                 let index = event["index"]
                     .as_u64()
-                    .ok_or(TransportError::MissingOutputIndex)?;
+                    .ok_or(ProtocolFault::MissingOutputIndex)?;
                 let step = self
                     .steps
                     .get_mut(&index)
-                    .ok_or_else(|| protocol("delta before step start"))?;
+                    .ok_or_else(|| ProtocolFault::Invalid("delta before step start"))?;
                 if step.stopped {
-                    return Err(protocol("delta after step stop"));
+                    return Err(ProtocolFault::Invalid("delta after step stop"));
                 }
                 let delta = &event["delta"];
                 let mut visible = None;
                 match delta["type"].as_str() {
                     Some("thought_signature") if step.native["type"] == "thought" => {
-                        let signature = delta["signature"].as_str().ok_or_else(invalid)?;
+                        let signature = delta["signature"]
+                            .as_str()
+                            .ok_or_else(ProtocolFault::invalid_input)?;
                         // A signature delta is the complete opaque signature, not text.
                         if step.native["signature"]
                             .as_str()
                             .is_some_and(|old| !old.is_empty() && old != signature)
                         {
-                            return Err(protocol("conflicting thought signature"));
+                            return Err(ProtocolFault::Invalid("conflicting thought signature"));
                         }
                         step.native["signature"] = signature.into();
                     }
                     Some("thought_summary") if step.native["type"] == "thought" => {
-                        let content = delta.get("content").ok_or_else(invalid)?.clone();
+                        let content = delta
+                            .get("content")
+                            .ok_or_else(ProtocolFault::invalid_input)?
+                            .clone();
                         if let Some(text) = content["text"].as_str() {
                             visible = Some((OutputChannel::ReasoningSummary, text.to_owned()));
                         }
@@ -334,25 +371,31 @@ impl Assembly {
                         }
                         step.native["summary"]
                             .as_array_mut()
-                            .ok_or_else(invalid)?
+                            .ok_or_else(ProtocolFault::invalid_input)?
                             .push(content);
                     }
                     Some("arguments_delta") if step.native["type"] == "function_call" => {
-                        let text = delta["arguments"].as_str().ok_or_else(invalid)?;
+                        let text = delta["arguments"]
+                            .as_str()
+                            .ok_or_else(ProtocolFault::invalid_input)?;
                         step.arguments
                             .get_or_insert_with(String::new)
                             .push_str(text);
                         visible = Some((OutputChannel::ToolArguments, text.to_owned()));
                     }
                     Some("text") if step.native["type"] == "model_output" => {
-                        let text = delta["text"].as_str().ok_or_else(invalid)?;
+                        let text = delta["text"]
+                            .as_str()
+                            .ok_or_else(ProtocolFault::invalid_input)?;
                         if step.native.get("content").is_none() {
                             step.native["content"] = json!([]);
                         }
-                        let parts = step.native["content"].as_array_mut().ok_or_else(invalid)?;
+                        let parts = step.native["content"]
+                            .as_array_mut()
+                            .ok_or_else(ProtocolFault::invalid_input)?;
                         if let Some(last) = parts.last_mut().filter(|part| part["type"] == "text") {
                             let Value::String(accumulated) = &mut last["text"] else {
-                                return Err(invalid());
+                                return Err(ProtocolFault::invalid_input());
                             };
                             accumulated.push_str(text);
                         } else {
@@ -360,11 +403,20 @@ impl Assembly {
                         }
                         visible = Some((OutputChannel::Assistant, text.to_owned()));
                     }
-                    _ => return Err(protocol("unsupported Interactions step delta")),
+                    _ => {
+                        return Err(ProtocolFault::Invalid(
+                            "unsupported Interactions step delta",
+                        ));
+                    }
                 }
                 if let Some((channel, text)) = visible {
                     events.push(StreamEvent::Delta {
-                        item_id: format!("{}:{index}", self.id.as_deref().ok_or_else(invalid)?),
+                        item_id: format!(
+                            "{}:{index}",
+                            self.id
+                                .as_deref()
+                                .ok_or_else(ProtocolFault::invalid_input)?
+                        ),
                         channel,
                         index: 0,
                         text,
@@ -375,17 +427,18 @@ impl Assembly {
             "step.stop" => {
                 let index = event["index"]
                     .as_u64()
-                    .ok_or(TransportError::MissingOutputIndex)?;
+                    .ok_or(ProtocolFault::MissingOutputIndex)?;
                 let step = self
                     .steps
                     .get_mut(&index)
-                    .ok_or_else(|| protocol("stop before step start"))?;
+                    .ok_or_else(|| ProtocolFault::Invalid("stop before step start"))?;
                 if step.stopped {
-                    return Err(protocol("duplicate step stop"));
+                    return Err(ProtocolFault::Invalid("duplicate step stop"));
                 }
                 if let Some(arguments) = step.arguments.take() {
-                    step.native["arguments"] = serde_json::from_str(&arguments)
-                        .map_err(|_| protocol("invalid completed function arguments"))?;
+                    step.native["arguments"] = serde_json::from_str(&arguments).map_err(|_| {
+                        ProtocolFault::Invalid("invalid completed function arguments")
+                    })?;
                 }
                 step.stopped = true;
             }
@@ -400,11 +453,16 @@ impl Assembly {
                         .get("id")
                         .or_else(|| interaction.get("interaction_id"))
                         .and_then(Value::as_str)
-                        .ok_or_else(invalid)?,
+                        .ok_or_else(ProtocolFault::invalid_input)?,
                 )?;
-                match interaction["status"].as_str() {
-                    Some("in_progress" | "queued") if kind == "interaction.status_update" => {}
-                    Some("completed" | "requires_action") => {
+                let status = InteractionStatus::parse(interaction["status"].as_str())?;
+                match status {
+                    InteractionStatus::InProgress | InteractionStatus::Queued => {
+                        if kind != "interaction.status_update" {
+                            return Err(ProtocolFault::Invalid("unsupported interaction status"));
+                        }
+                    }
+                    InteractionStatus::Completed | InteractionStatus::RequiresAction => {
                         if let Some(steps) = interaction
                             .get("steps")
                             .and_then(Value::as_array)
@@ -413,7 +471,7 @@ impl Assembly {
                             for (index, native) in steps.iter().enumerate() {
                                 if let Some(prior) = self.steps.get(&(index as u64)) {
                                     if !prior.stopped || &prior.native != native {
-                                        return Err(TransportError::ConflictingOutputIndex {
+                                        return Err(ProtocolFault::ConflictingOutputIndex {
                                             index: index as u64,
                                         });
                                     }
@@ -429,27 +487,31 @@ impl Assembly {
                                 }
                             }
                             if self.steps.len() != steps.len() {
-                                return Err(invalid());
+                                return Err(ProtocolFault::invalid_input());
                             }
                         }
                         if self.steps.values().any(|step| !step.stopped) {
-                            return Err(protocol("interaction ended with unfinished step"));
+                            return Err(ProtocolFault::Invalid(
+                                "interaction ended with unfinished step",
+                            ));
                         }
-                        if interaction["status"] == "requires_action"
+                        if matches!(status, InteractionStatus::RequiresAction)
                             && !self
                                 .steps
                                 .values()
                                 .any(|step| step.native["type"] == "function_call")
                         {
-                            return Err(protocol("requires_action without function call"));
+                            return Err(ProtocolFault::Invalid(
+                                "requires_action without function call",
+                            ));
                         }
                         let usage = Usage::from_interaction_usage(interaction);
                         observation.usage = Some(usage.clone());
                         observation.terminal = Some(super::ResponseTerminal::Completed);
                         self.terminal = Some(usage);
                     }
-                    Some("incomplete" | "budget_exceeded") => {
-                        let reason = (interaction["status"] == "budget_exceeded")
+                    InteractionStatus::Incomplete | InteractionStatus::BudgetExceeded => {
+                        let reason = matches!(status, InteractionStatus::BudgetExceeded)
                             .then_some(super::IncompleteReason::BudgetExceeded);
                         let (response_id, truncated) = super::observation::metadata(
                             self.id.as_deref().unwrap(),
@@ -457,44 +519,35 @@ impl Assembly {
                             account,
                         );
                         observation.metadata_truncated |= truncated;
-                        observation.terminal = Some(super::ResponseTerminal::Incomplete {
-                            response_id: response_id.clone(),
-                            reason,
-                        });
-                        return Err(TransportError::ResponseIncomplete {
+                        return Ok(AssemblyAdvance::Stopped(DeclaredStop::Incomplete {
                             response_id,
                             reason,
-                        });
+                        }));
                     }
-                    Some("failed" | "cancelled") => {
-                        let (event, terminal) = if interaction["status"] == "failed" {
-                            (
-                                super::ProviderStreamFailureEvent::InteractionFailed,
-                                super::ResponseTerminal::InteractionFailed,
-                            )
-                        } else {
-                            (
-                                super::ProviderStreamFailureEvent::InteractionCancelled,
-                                super::ResponseTerminal::InteractionCancelled,
-                            )
+                    InteractionStatus::Failed | InteractionStatus::Cancelled => {
+                        let event = match status {
+                            InteractionStatus::Failed => {
+                                super::ProviderStreamFailureEvent::InteractionFailed
+                            }
+                            InteractionStatus::Cancelled => {
+                                super::ProviderStreamFailureEvent::InteractionCancelled
+                            }
+                            _ => unreachable!("failed or cancelled status"),
                         };
-                        observation.terminal = Some(terminal);
-                        return Err(TransportError::ProviderStreamFailure {
+                        return Ok(AssemblyAdvance::Stopped(DeclaredStop::Failed {
                             event,
                             diagnostic: None,
-                        });
+                        }));
                     }
-                    _ => return Err(protocol("unsupported interaction status")),
                 }
             }
             "error" => {
-                observation.terminal = Some(super::ResponseTerminal::Error);
-                return Err(TransportError::ProviderStreamFailure {
+                return Ok(AssemblyAdvance::Stopped(DeclaredStop::Failed {
                     event: super::ProviderStreamFailureEvent::Error,
                     diagnostic: None,
-                });
+                }));
             }
-            _ => return Err(protocol("unsupported Interactions event")),
+            _ => return Err(ProtocolFault::Invalid("unsupported Interactions event")),
         }
         // Only release complete contiguous siblings. Network completion order is
         // never tool-call order, and incomplete steps never become executable.
@@ -504,34 +557,43 @@ impl Assembly {
             .filter(|step| step.stopped)
         {
             let index = self.next_emitted;
-            let id = format!("{}:{index}", self.id.as_deref().ok_or_else(invalid)?);
-            let item = project(step.native.clone(), &id)?;
+            let id = format!(
+                "{}:{index}",
+                self.id
+                    .as_deref()
+                    .ok_or_else(ProtocolFault::invalid_input)?
+            );
+            let item = project(step.native.clone(), &id).map_err(ProtocolFault::Unsupported)?;
             events.push(StreamEvent::CompletedItem(
                 CompletedOutputItem::from_complete_response(item, index),
             ));
             self.next_emitted += 1;
         }
-        Ok(events)
+        Ok(if self.terminal.is_some() {
+            AssemblyAdvance::Complete(events)
+        } else {
+            AssemblyAdvance::Progress(events)
+        })
     }
-    pub(super) fn is_complete(&self) -> bool {
-        self.terminal.is_some()
-    }
-    pub(super) fn finish(self) -> Result<ResponsesTurn, TransportError> {
-        let usage = self.terminal.ok_or(TransportError::IncompleteResponse(
-            super::StreamInterruption::MissingCompletion,
-        ))?;
-        let response_id = self.id.ok_or_else(invalid)?;
+    pub(super) fn finish_complete(self) -> Result<ResponsesTurn, ProtocolFault> {
+        let usage = self
+            .terminal
+            .ok_or(ProtocolFault::Invalid("missing native completion"))?;
+        let response_id = self.id.ok_or_else(ProtocolFault::invalid_input)?;
         let mut items = Vec::new();
         for (expected, (index, step)) in self.steps.into_iter().enumerate() {
             if index != expected as u64 {
-                return Err(TransportError::IncompleteOutputIndices {
+                return Err(ProtocolFault::IncompleteOutputIndices {
                     index: expected as u64,
                 });
             }
             if !step.stopped {
-                return Err(protocol("unfinished Gemini step"));
+                return Err(ProtocolFault::Invalid("unfinished Gemini step"));
             }
-            items.push(project(step.native, &format!("{response_id}:{index}"))?);
+            items.push(
+                project(step.native, &format!("{response_id}:{index}"))
+                    .map_err(ProtocolFault::Unsupported)?,
+            );
         }
         Ok(ResponsesTurn {
             response_id,

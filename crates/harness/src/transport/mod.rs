@@ -4,6 +4,7 @@
 //! Explicit ChatGPT-plan and DeepSeek credentials under Standard Responses.
 
 mod admission;
+mod assembly;
 mod interactions;
 pub use admission::{
     CredentialReference, InferenceLimits, NativeTransportAdmission, NativeTransportContract,
