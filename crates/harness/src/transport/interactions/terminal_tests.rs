@@ -154,11 +154,64 @@ impl LocalHttp {
     fn store(&self) -> Arc<Store> {
         Arc::new(Store::open(self.directory.join("store.sqlite")).unwrap())
     }
+    fn diagnose(&self, label: &str, store: &Store, calls: &AtomicUsize) {
+        eprintln!(
+            "{label}: HTTP={} effects={} Store={}",
+            self.requests.load(Ordering::SeqCst),
+            calls.load(Ordering::SeqCst),
+            self.directory.join("store.sqlite").display()
+        );
+        let events = match store.events(None) {
+            Ok(events) => events,
+            Err(error) => {
+                eprintln!("{label}: Store event observation failed: {error:?}");
+                return;
+            }
+        };
+        let mut requests = Vec::new();
+        for event in events {
+            eprintln!(
+                "{label}: event={} kind={} request={:?}",
+                event.id, event.kind, event.request
+            );
+            if let Some(request) = event.request {
+                if !requests.contains(&request) {
+                    requests.push(request);
+                }
+            }
+        }
+        for request in requests {
+            let claims = store.claims_on(&request);
+            let claim_states = claims.as_ref().map(|claims| {
+                claims
+                    .iter()
+                    .map(|claim| (&claim.call_id, &claim.state))
+                    .collect::<Vec<_>>()
+            });
+            eprintln!(
+                "{label}: request={request:?} provider={:?} items={:?} claims={:?}",
+                store.provider_response_state(&request),
+                store.items(&request).map(|items| items.len()),
+                claim_states
+            );
+        }
+        eprintln!(
+            "{label}: embedded={:?}",
+            store.embedded_inference_state(&identity())
+        );
+    }
 }
 impl Drop for LocalHttp {
     fn drop(&mut self) {
         self.server.abort();
-        let _ = std::fs::remove_dir_all(&self.directory);
+        if std::thread::panicking() {
+            eprintln!(
+                "failed Gemini terminal Store retained at {}",
+                self.directory.display()
+            );
+        } else {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
     }
 }
 
@@ -222,15 +275,7 @@ async fn engine(
 ) -> Engine<GeminiAuth, BoundProvider> {
     // Install through the same host surface and request snapshot owner as an
     // embedding. A raw Provider does not own Gemini's wire encoding.
-    let manifest = EmbeddedToolManifest::with_scheduling(
-        effect.tools(),
-        [(
-            "effect".into(),
-            crate::provider::ToolScheduling::BeforeNextInference,
-        )]
-        .into(),
-    )
-    .unwrap();
+    let manifest = EmbeddedToolManifest::new(effect.tools()).unwrap();
     let surface = Arc::new(
         ToolSurface::from_manifest(
             "terminal-fixture".into(),
@@ -520,7 +565,8 @@ async fn terminal_http_facts_and_escaped_prefix_survive_engine_block_and_store_r
 #[tokio::test]
 async fn escaped_tool_before_http_eof_executes_once_and_never_authorizes_retry() {
     let effect = Arc::new(Notify::new());
-    let call = json!({"type":"function_call","id":"once","name":"effect","arguments":{}});
+    let call = json!({"type":"function_call","id":"once","name":"effect",
+        "arguments":{"arguments":{},"delivery":"wait"}});
     let http = LocalHttp::new(
         vec![wire(vec![
             created("escaped"),
@@ -542,7 +588,7 @@ async fn escaped_tool_before_http_eof_executes_once_and_never_authorizes_retry()
     )
     .await;
     let (_stop, cancel) = watch::channel(false);
-    let error = tokio::time::timeout(
+    let outcome = tokio::time::timeout(
         Duration::from_secs(10),
         engine.run_embedded(
             None,
@@ -551,9 +597,14 @@ async fn escaped_tool_before_http_eof_executes_once_and_never_authorizes_retry()
             tokio::sync::mpsc::unbounded_channel().1,
         ),
     )
-    .await
-    .unwrap()
-    .unwrap_err();
+    .await;
+    match &outcome {
+        Err(error) => eprintln!("escaped effect timeout: {error:?}"),
+        Ok(Err(error)) => eprintln!("escaped effect typed error: {error:?}"),
+        Ok(Ok(_)) => eprintln!("escaped effect unexpectedly completed"),
+    }
+    http.diagnose("escaped effect", &store, &calls);
+    let error = outcome.unwrap().unwrap_err();
     let EngineError::BlockedAction(failure) = error else {
         panic!("lost interruption block: {error:?}");
     };
@@ -617,7 +668,7 @@ async fn malformed_http_is_failed_protocol_not_interrupted_or_declared_terminal(
     .await
     .with_origin(store.standalone_identity(identity().actor));
     let (_stop, cancel) = watch::channel(false);
-    let error = tokio::time::timeout(
+    let outcome = tokio::time::timeout(
         Duration::from_secs(10),
         engine.run(
             None,
@@ -626,9 +677,14 @@ async fn malformed_http_is_failed_protocol_not_interrupted_or_declared_terminal(
             tokio::sync::mpsc::unbounded_channel().1,
         ),
     )
-    .await
-    .unwrap()
-    .unwrap_err();
+    .await;
+    match &outcome {
+        Err(error) => eprintln!("malformed stream timeout: {error:?}"),
+        Ok(Err(error)) => eprintln!("malformed stream typed error: {error:?}"),
+        Ok(Ok(_)) => eprintln!("malformed stream unexpectedly completed"),
+    }
+    http.diagnose("malformed stream", &store, &calls);
+    let error = outcome.unwrap().unwrap_err();
     assert!(matches!(
         error,
         EngineError::Transport(TransportError::Stream(_))
