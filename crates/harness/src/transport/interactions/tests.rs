@@ -760,3 +760,48 @@ fn known_model_output_refuses_unsupported_or_malformed_content_without_text_succ
     assert_eq!(done.item().0["gemini_step"], native);
     assert!(done.item().tool_call().unwrap().is_none());
 }
+
+#[test]
+fn moved_input_and_config_match_previous_wire_construction() {
+    for count in [0, 1, 16] {
+        for instructions in ["", "policy λ"] {
+            let mut request = request_fixture();
+            request.input = (0..count).map(|_| Item::user_text("text λ\u{0}")).collect();
+            request.instructions = instructions.into();
+            let limits = InferenceLimits::gemini_default();
+            let actual = super::request(&request, limits, &vec![true; count]).unwrap();
+            let input: Vec<_> = (0..count).map(|_| json!({"type":"user_input","content":[{"type":"text","text":"text λ\u{0}"}]})).collect();
+            let mut config = json!({"thinking_level":Effort::Medium,"thinking_summaries":"auto"});
+            if let Some(limit) = limits.max_output_tokens {
+                config["max_output_tokens"] = limit.into();
+            }
+            // Previous json! construction, independent of the returned body.
+            let mut previous = json!({"model":request.model,"input":input,"store":false,"stream":true,"generation_config":config});
+            if !instructions.is_empty() {
+                previous["system_instruction"] = instructions.into();
+            }
+            assert_eq!(
+                serde_json::to_vec(&actual).unwrap(),
+                serde_json::to_vec(&previous).unwrap()
+            );
+            assert!(matches!(
+                super::request(&request, limits, &vec![true; count + 1]),
+                Err(TransportError::InvalidAdmission)
+            ));
+        }
+    }
+}
+
+#[test]
+fn moved_gemini_body_retains_typed_native_overlay_refusal() {
+    let mut request = request_fixture();
+    request.input = vec![Item(
+        json!({"type":"message","role":"user","content":"changed","gemini_step":{"type":"user_input","content":[{"type":"text","text":"original"}]}}),
+    )];
+    assert!(matches!(
+        normalize(&request, &[false]),
+        Err(TransportError::UnsupportedSemantics(
+            UnsupportedSemantics::InputItem
+        ))
+    ));
+}

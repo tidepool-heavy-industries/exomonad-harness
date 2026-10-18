@@ -138,7 +138,9 @@ pub(super) fn request(
     if !tools.is_empty() {
         config["tool_choice"] = "auto".into();
     }
-    let mut body = json!({"model":request.model,"input":input,"store":false,"stream":true,"generation_config":config});
+    let mut body = json!({"model":request.model,"store":false,"stream":true});
+    body["input"] = Value::Array(input);
+    body["generation_config"] = config;
     if !request.instructions.is_empty() {
         body["system_instruction"] = request.instructions.clone().into();
     }

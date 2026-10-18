@@ -384,7 +384,8 @@ fn deepseek_request(
         }
         input.push(item);
     }
-    let mut body = serde_json::json!({"model":request.model,"input":input,"stream":true,"max_output_tokens":limits.max_output_tokens,"reasoning":{"effort":crate::item::Item::effective_effort(&request.input, request.pinned_effort)}});
+    let mut body = serde_json::json!({"model":request.model,"stream":true,"max_output_tokens":limits.max_output_tokens,"reasoning":{"effort":crate::item::Item::effective_effort(&request.input, request.pinned_effort)}});
+    body["input"] = Value::Array(input);
     if !request.instructions.is_empty() {
         body["instructions"] = Value::String(request.instructions.clone());
     }
@@ -967,6 +968,69 @@ mod tests {
         model::Effort,
         transport::{ResponsesClient, auth::ChatGptPlanAuth},
     };
+
+    #[test]
+    fn deepseek_moved_input_matches_previous_wire_construction() {
+        for count in [0, 1, 16] {
+            for instructions in ["", "policy λ"] {
+                let input: Vec<_> = (0..count).map(|_| Item::user_text("text λ\u{0}")).collect();
+                let request = ResponsesRequest {
+                    input,
+                    instructions: instructions.into(),
+                    tools: Vec::<Value>::new().into(),
+                    tools_allowed: None,
+                    model: "deepseek-v4-pro".into(),
+                    pinned_effort: Effort::Low,
+                    session_id: "session".into(),
+                    prompt_cache_comparison: None,
+                };
+                let limits = super::super::InferenceLimits::deepseek_default();
+                let actual = deepseek_request(&request, limits, &vec![true; count]).unwrap();
+                // Previous json! construction, using independently known input projection.
+                let input: Vec<_> = (0..count)
+                    .map(|_| json!({"type":"message","role":"user","content":"text λ\u{0}"}))
+                    .collect();
+                let mut previous = json!({"model":request.model,"input":input,"stream":true,"max_output_tokens":limits.max_output_tokens,"reasoning":{"effort":Effort::Low}});
+                if !instructions.is_empty() {
+                    previous["instructions"] = instructions.into();
+                }
+                assert_eq!(
+                    serde_json::to_vec(&actual).unwrap(),
+                    serde_json::to_vec(&previous).unwrap()
+                );
+                assert!(matches!(
+                    deepseek_request(&request, limits, &vec![true; count + 1]),
+                    Err(TransportError::InvalidAdmission)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn moved_deepseek_body_retains_typed_reasoning_refusal() {
+        let request = ResponsesRequest {
+            input: vec![Item(
+                json!({"type":"reasoning","encrypted_content":"opaque","content":[]}),
+            )],
+            instructions: String::new(),
+            tools: Vec::<Value>::new().into(),
+            tools_allowed: None,
+            model: "deepseek-v4-pro".into(),
+            pinned_effort: Effort::Low,
+            session_id: "session".into(),
+            prompt_cache_comparison: None,
+        };
+        assert!(matches!(
+            deepseek_request(
+                &request,
+                super::super::InferenceLimits::deepseek_default(),
+                &[false]
+            ),
+            Err(TransportError::UnsupportedSemantics(
+                super::super::UnsupportedSemantics::ReasoningContent
+            ))
+        ));
+    }
 
     #[test]
     fn request_is_stateless_and_pins_effort() {
