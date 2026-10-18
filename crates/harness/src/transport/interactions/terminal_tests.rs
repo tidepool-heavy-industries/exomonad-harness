@@ -1,14 +1,18 @@
 use super::*;
 use crate::{
-    embedding::{HostIdentity, HostInferenceState, InferenceBlockReason},
+    embedding::{
+        AdmissionGuard, BoundProvider, Conversation, EmbeddedError, EmbeddedToolManifest,
+        HostActor, HostControl, HostControlError, HostIdentity, HostInferenceState,
+        InferenceBlockReason, ToolSurface,
+    },
     engine::{Engine, EngineConfig, EngineError},
-    model::{AgentPath, ConversationIdentity},
+    model::AgentPath,
     provider::{Provider, ProviderError},
     store::{ProviderResponseState, Store},
     transport::{
         CredentialReference, IncompleteReason, NativeTransportAdmission, NativeTransportContract,
-        ProviderStreamFailureEvent, ResponseEnd, ResponseTerminal, StreamInterruption,
-        TransportObservation, auth::GeminiAuth,
+        ProviderStreamFailureEvent, ResponseEnd, ResponseTerminal, ResponsesClient,
+        StreamInterruption, TransportObservation, auth::GeminiAuth,
     },
     turn::JobScheduler,
 };
@@ -187,29 +191,79 @@ fn identity() -> HostIdentity {
         incarnation: "one".into(),
     }
 }
-fn engine(http: &LocalHttp, store: Arc<Store>, effect: Effect) -> Engine<GeminiAuth, Effect> {
-    let identity = identity();
-    store.bind_embedded_actor(&identity, None).unwrap();
-    let tools = effect.tools();
-    Engine::new(
-        http.auth.clone(),
-        store,
-        Arc::new(JobScheduler::new(1).unwrap()),
-        Arc::new(effect),
-        EngineConfig {
-            instructions: "offline Gemini terminal control".into(),
-            tools,
-            model: "gemini-4-argon".into(),
-            effort: Effort::Low,
-            session_id: "gemini-terminal".into(),
-            agent: identity.actor.clone(),
-        },
+struct LocalHost {
+    identity: HostIdentity,
+    surface: Arc<ToolSurface>,
+}
+struct LocalAdmission;
+impl AdmissionGuard for LocalAdmission {}
+#[async_trait::async_trait]
+impl HostActor for LocalHost {
+    fn identity(&self) -> &HostIdentity {
+        &self.identity
+    }
+    async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+        Ok(Box::new(LocalAdmission))
+    }
+    async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+        Ok(self.surface.clone())
+    }
+    async fn wake(&self, _: i64) -> Result<(), String> {
+        panic!("no input wake in HTTP fixture")
+    }
+    async fn control(&self, _: HostControl) -> Result<Value, HostControlError> {
+        panic!("no host control in HTTP fixture")
+    }
+}
+async fn engine(
+    http: &LocalHttp,
+    store: Arc<Store>,
+    effect: Effect,
+) -> Engine<GeminiAuth, BoundProvider> {
+    // Install through the same host surface and request snapshot owner as an
+    // embedding. A raw Provider does not own Gemini's wire encoding.
+    let manifest = EmbeddedToolManifest::with_scheduling(
+        effect.tools(),
+        [(
+            "effect".into(),
+            crate::provider::ToolScheduling::BeforeNextInference,
+        )]
+        .into(),
     )
-    .with_origin(ConversationIdentity::Embedded {
-        run: identity.run,
-        actor: identity.actor,
-        incarnation: identity.incarnation,
-    })
+    .unwrap();
+    let surface = Arc::new(
+        ToolSurface::from_manifest(
+            "terminal-fixture".into(),
+            Arc::new(manifest),
+            Arc::new(effect),
+        )
+        .unwrap(),
+    );
+    let conversation = Conversation::attach(
+        store,
+        Arc::new(LocalHost {
+            identity: identity(),
+            surface,
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    conversation
+        .engine(
+            ResponsesClient::new(http.auth.clone()),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            EngineConfig {
+                instructions: "offline Gemini terminal control".into(),
+                tools: vec![],
+                model: "gemini-4-argon".into(),
+                effort: Effort::Low,
+                session_id: "gemini-terminal".into(),
+                agent: identity().actor,
+            },
+            std::num::NonZeroU64::new(1_000_000).unwrap(),
+        )
+        .unwrap()
 }
 
 fn summary(store: &Store, request: &crate::model::RequestId) -> TransportObservation {
@@ -239,7 +293,8 @@ async fn empty_http_eof_uses_existing_effect_free_retry_and_retains_interruption
             calls: calls.clone(),
             completed: None,
         },
-    );
+    )
+    .await;
     let (_stop, cancel) = watch::channel(false);
     let completion = tokio::time::timeout(
         Duration::from_secs(10),
@@ -332,7 +387,8 @@ async fn terminal_http_facts_and_escaped_prefix_survive_engine_block_and_store_r
                 calls: calls.clone(),
                 completed: None,
             },
-        );
+        )
+        .await;
         let (_stop, cancel) = watch::channel(false);
         let error = tokio::time::timeout(
             Duration::from_secs(10),
@@ -483,7 +539,8 @@ async fn escaped_tool_before_http_eof_executes_once_and_never_authorizes_retry()
             calls: calls.clone(),
             completed: Some(effect),
         },
-    );
+    )
+    .await;
     let (_stop, cancel) = watch::channel(false);
     let error = tokio::time::timeout(
         Duration::from_secs(10),
@@ -557,6 +614,7 @@ async fn malformed_http_is_failed_protocol_not_interrupted_or_declared_terminal(
             completed: None,
         },
     )
+    .await
     .with_origin(store.standalone_identity(identity().actor));
     let (_stop, cancel) = watch::channel(false);
     let error = tokio::time::timeout(
