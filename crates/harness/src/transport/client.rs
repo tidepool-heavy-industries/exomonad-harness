@@ -811,7 +811,14 @@ async fn read_response_observed(
     let mut assembly = ProviderAssembly::new(route);
     let (result, end) = 'body: loop {
         let Some(chunk) = stream.next().await else {
-            break (assembly.finish(), ResponseEnd::CleanEof);
+            // Accepted completion exits while processing its frame. A running
+            // reader reaching EOF has no completion proof, regardless of dialect.
+            break (
+                Err(TransportError::IncompleteResponse(
+                    super::StreamInterruption::MissingCompletion,
+                )),
+                ResponseEnd::CleanEof,
+            );
         };
         let chunk = match chunk {
             Ok(chunk) => chunk,
@@ -824,9 +831,9 @@ async fn read_response_observed(
                     .collect();
                 tracing::warn!(error = %diagnostic, "provider response body read failed");
                 break (
-                    assembly.finish().map_err(|_| {
-                        TransportError::IncompleteResponse(super::StreamInterruption::ReadFailed)
-                    }),
+                    Err(TransportError::IncompleteResponse(
+                        super::StreamInterruption::ReadFailed,
+                    )),
                     ResponseEnd::ReadFailed,
                 );
             }

@@ -2009,7 +2009,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             drop(create);
                             let retained_tail = self.retain_provider_tail(&provider_request, &parent, &mut event_rx).await;
                             let retained_observation = self.retain_transport_receipt(&parent, &mut transport_observation).await;
-                            let state = if matches!(error, TransportError::IncompleteResponse(_)) { crate::store::ProviderResponseState::Interrupted } else if error.request_failure().is_some() { crate::store::ProviderResponseState::Rejected } else { crate::store::ProviderResponseState::Failed };
+                            let state = error.failure_kind().provider_response_state();
                             let store = self.store.clone();
                             let stopped_request = parent.clone();
                             let stopped = blocking(move || store.stop_provider_response(&stopped_request, state)).await;
@@ -4874,17 +4874,12 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 Ok(turn)
             }
             Err(error) => {
-                let state = if matches!(
-                    error,
-                    EngineError::Cancelled { .. }
-                        | EngineError::Transport(TransportError::IncompleteResponse(_))
-                ) {
-                    crate::store::ProviderResponseState::Interrupted
-                } else if matches!(&error, EngineError::Transport(error) if error.request_failure().is_some())
-                {
-                    crate::store::ProviderResponseState::Rejected
-                } else {
-                    crate::store::ProviderResponseState::Failed
+                let state = match &error {
+                    EngineError::Cancelled { .. } => {
+                        crate::store::ProviderResponseState::Interrupted
+                    }
+                    EngineError::Transport(error) => error.failure_kind().provider_response_state(),
+                    _ => crate::store::ProviderResponseState::Failed,
                 };
                 let store = self.store.clone();
                 let stopped_request = request.clone();

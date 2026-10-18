@@ -41,6 +41,21 @@ pub(crate) enum TransportFailureKind {
     Other,
 }
 
+impl TransportFailureKind {
+    /// The stopped attempt's retained disposition is not a recovery grant.
+    /// Store separately checks escaped items, claims, cleanup and lineage.
+    pub(crate) fn provider_response_state(&self) -> crate::store::ProviderResponseState {
+        use crate::store::ProviderResponseState;
+        match self {
+            Self::Rejected(_) => ProviderResponseState::Rejected,
+            Self::Interrupted(_) => ProviderResponseState::Interrupted,
+            Self::ProviderFailed { .. } | Self::ProviderIncomplete { .. } | Self::Other => {
+                ProviderResponseState::Failed
+            }
+        }
+    }
+}
+
 impl TransportError {
     pub(crate) fn failure_kind(&self) -> TransportFailureKind {
         match self {
