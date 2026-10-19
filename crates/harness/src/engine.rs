@@ -1771,32 +1771,15 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .zip(history.provenance)
                 .enumerate()
             {
-                let issuing_request = input_occurrences
-                    .get(index)
-                    .and_then(Option::as_ref)
-                    .and_then(|occurrence| occurrence.output_operation.as_ref())
-                    .map_or(&request, |operation| &operation.request);
-                if let Some(candidate) =
-                    request_provider.model_visible_item(issuing_request, &item)?
+                if let Some(projected) = self
+                    .qualified_model_visible_projection(
+                        request_provider.as_ref(),
+                        &request,
+                        &item,
+                        input_occurrences.get(index).and_then(Option::as_ref),
+                    )
+                    .await?
                 {
-                    let Some(occurrence) = input_occurrences
-                        .get(index)
-                        .and_then(Option::as_ref)
-                        .cloned()
-                    else {
-                        return Err(StoreError::Context(crate::context::ContextError::Replay(
-                            crate::context::ContextReplayRejection::InvalidMembership,
-                        ))
-                        .into());
-                    };
-                    let store = self.store.clone();
-                    let projected =
-                        blocking(move || store.qualify_model_visible_item(&occurrence, &candidate))
-                            .await;
-                    let projected = match projected {
-                        Ok(projected) => projected,
-                        Err(error) => return Err(error),
-                    };
                     let (item, occurrence) = projected.into_parts();
                     input_occurrences[index] = Some(occurrence);
                     input_hashes.push(None);
@@ -4569,6 +4552,30 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         }
     }
 
+    async fn qualified_model_visible_projection(
+        &self,
+        provider: &dyn Provider,
+        request: &RequestId,
+        item: &Item,
+        occurrence: Option<&crate::context::Occurrence>,
+    ) -> Result<Option<crate::store::context::CheckedModelItemProjection>, EngineError> {
+        let issuing_request = occurrence
+            .and_then(|occurrence| occurrence.output_operation.as_ref())
+            .map_or(request, |operation| &operation.request);
+        let Some(candidate) = provider.model_visible_item(issuing_request, item)? else {
+            return Ok(None);
+        };
+        let occurrence = occurrence.cloned().ok_or_else(|| {
+            StoreError::Context(crate::context::ContextError::Replay(
+                crate::context::ContextReplayRejection::InvalidMembership,
+            ))
+        })?;
+        let store = self.store.clone();
+        blocking(move || store.qualify_model_visible_item(&occurrence, &candidate))
+            .await
+            .map(Some)
+    }
+
     async fn compact_window(
         &self,
         source: &RequestId,
@@ -4654,7 +4661,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             })
         };
         let summary_response = std::sync::Mutex::new(None::<(String, Usage)>);
-        let text_turn = |input: CompactionInput| -> ServerCompactFuture<'_> {
+        let text_turn = |mut input: CompactionInput| -> ServerCompactFuture<'_> {
             let summary_response = &summary_response;
             let cancellation = cancellation.clone();
             Box::pin(async move {
@@ -4662,6 +4669,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     .snapshot_provider()
                     .await
                     .map_err(|error| CompactError::Failed(error.to_string()))?;
+                for (item, occurrence) in input.items.iter_mut().zip(&mut input.occurrences) {
+                    let request = occurrence
+                        .as_ref()
+                        .map_or(source, |occurrence| &occurrence.request);
+                    if let Some(projected) = self
+                        .qualified_model_visible_projection(
+                            request_provider.as_ref(),
+                            request,
+                            item,
+                            occurrence.as_ref(),
+                        )
+                        .await
+                        .map_err(|error| CompactError::Failed(error.to_string()))?
+                    {
+                        let (projected_item, projected_occurrence) = projected.into_parts();
+                        *item = projected_item;
+                        *occurrence = Some(projected_occurrence);
+                    }
+                }
                 let prepared = self
                     .prepare_compaction_submission(
                         source,

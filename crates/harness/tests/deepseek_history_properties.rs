@@ -1576,3 +1576,305 @@ async fn http_repeated_plain_text_compaction_preserves_native_developer_and_syst
     drop(calls);
     server.finish().await;
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceiptProjection {
+    Valid,
+    Missing,
+    Forged,
+}
+
+struct ReceiptTools {
+    store: Arc<Store>,
+    mode: ReceiptProjection,
+    calls: Mutex<Vec<OperationId>>,
+    projection_issuers: Mutex<Vec<RequestId>>,
+}
+
+#[async_trait]
+impl Provider for ReceiptTools {
+    fn tools(&self) -> Vec<Value> {
+        ["receipt", "trigger"].into_iter().map(|name| json!({
+            "type":"function", "name":name, "strict":true,
+            "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}
+        })).collect()
+    }
+    fn tool_scheduling(&self, _: &str) -> ToolScheduling {
+        ToolScheduling::BeforeNextInference
+    }
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        panic!("receipt fixture requires its actual operation")
+    }
+    async fn complete_call(
+        &self,
+        name: &str,
+        input: ToolInput,
+        context: CallContext,
+    ) -> ProviderCompletion {
+        assert_eq!(input, ToolInput::Function(json!({})));
+        self.calls.lock().unwrap().push(context.operation.unwrap());
+        let mut completion = ProviderCompletion::unedited(Ok(if name == "receipt" {
+            json!({"raw_receipt":"canonical receipt body ".repeat(8_192)})
+        } else {
+            assert_eq!(name, "trigger");
+            json!("trigger complete")
+        }));
+        if name == "receipt" {
+            completion.output_format = harness::provider::OutputFormat::NativeReceiptV1;
+        }
+        completion
+    }
+    async fn output_retained(&self, operation: &OperationId) -> Result<(), ProviderError> {
+        let retained = self
+            .store
+            .replay_tool_output_operation(operation)
+            .unwrap()
+            .unwrap();
+        if retained.output_format == harness::provider::OutputFormat::NativeReceiptV1
+            && self.mode != ReceiptProjection::Missing
+        {
+            self.store
+                .publish_model_output_projection(
+                    operation,
+                    json!({"approved":"compact annotation"}),
+                )
+                .unwrap();
+        }
+        Ok(())
+    }
+    fn model_visible_item(
+        &self,
+        request: &RequestId,
+        item: &Item,
+    ) -> Result<Option<harness::provider::ModelVisibleItemCandidate>, ProviderError> {
+        if item.output_format().unwrap() != harness::provider::OutputFormat::NativeReceiptV1 {
+            return Ok(None);
+        }
+        let operation = self
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|operation| operation.call.0 == item.0["call_id"].as_str().unwrap())
+            .unwrap()
+            .clone();
+        assert_eq!(
+            request, &operation.request,
+            "projection must use the original output issuer across successor occurrences"
+        );
+        self.projection_issuers
+            .lock()
+            .unwrap()
+            .push(request.clone());
+        let mut candidate = self
+            .store
+            .model_output_projection(&operation)
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
+        if self.mode == ReceiptProjection::Forged {
+            candidate.as_mut().unwrap().item.0["output"] = json!("unissued replacement");
+        }
+        Ok(candidate)
+    }
+}
+
+#[tokio::test]
+async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_invalid_evidence() {
+    for mode in [
+        ReceiptProjection::Valid,
+        ReceiptProjection::Missing,
+        ReceiptProjection::Forged,
+    ] {
+        let mut server = LocalResponses::start().await;
+        let files = Files::new();
+        let store = Arc::new(Store::open(files.0.join("receipt.sqlite")).unwrap());
+        let provider = Arc::new(ReceiptTools {
+            store: store.clone(),
+            mode,
+            calls: Mutex::new(vec![]),
+            projection_issuers: Mutex::new(vec![]),
+        });
+        let manifest = EmbeddedToolManifest::with_scheduling(
+            provider.tools(),
+            HashMap::from([
+                ("receipt".into(), ToolScheduling::BeforeNextInference),
+                ("trigger".into(), ToolScheduling::BeforeNextInference),
+            ]),
+        )
+        .unwrap();
+        let application = Arc::new(Application {
+            committed: None,
+            identity: HostIdentity {
+                run: "receipt-compaction".into(),
+                actor: AgentPath("/root".into()),
+                incarnation: "first".into(),
+            },
+            surface: Arc::new(
+                ToolSurface::from_manifest(
+                    "receipt-v1".into(),
+                    Arc::new(manifest),
+                    provider.clone(),
+                )
+                .unwrap(),
+            ),
+        });
+        let conversation = Conversation::attach(store.clone(), application, None)
+            .await
+            .unwrap();
+        let engine = conversation
+            .engine::<DeepSeekAuth, _>(
+                ResponsesClient::new(files.auth(&server.endpoint)),
+                Arc::new(JobScheduler::new(1).unwrap()),
+                EngineConfig {
+                    instructions: "Preserve the result evidence".into(),
+                    tools: vec![],
+                    model: "deepseek-flash".into(),
+                    effort: Effort::High,
+                    session_id: "receipt-compaction".into(),
+                    agent: AgentPath("/root".into()),
+                },
+                NonZeroU64::new(100).unwrap(),
+            )
+            .unwrap();
+        let (_cancel, cancellation) = watch::channel(false);
+        let (_mail, incoming) = mpsc::unbounded_channel();
+        let running = engine.run(
+            None,
+            vec![Item::user_text("Inspect the receipt and continue")],
+            cancellation,
+            incoming,
+        );
+        tokio::pin!(running);
+        let first = tokio::select! {
+            result = &mut running => panic!("initial request missing: {result:?}"),
+            request = server.next() => request,
+        };
+        let call = |id: &str, name: &str| json!({"type":"function_call", "id":format!("item-{id}"), "call_id":id, "name":name, "arguments":"{}"});
+        first.respond(completed_with_usage(
+            "receipt-response",
+            &[call("native01", "receipt")],
+            Some(if mode == ReceiptProjection::Valid {
+                1
+            } else {
+                100
+            }),
+        ));
+        if mode == ReceiptProjection::Valid {
+            let normal = tokio::select! {
+                result = &mut running => panic!("ordinary projected request missing: {result:?}"),
+                request = server.next() => request,
+            };
+            let expected = json!({"type":"function_call_output", "call_id":"native01", "output":"{\"approved\":\"compact annotation\"}"});
+            let output = |body: &Value| {
+                body["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|item| {
+                        item["type"] == "function_call_output" && item["call_id"] == "native01"
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(output(&normal.captured.json()), vec![expected.clone()]);
+            normal.respond(completed_with_usage(
+                "trigger-response",
+                &[call("trigger02", "trigger")],
+                Some(100),
+            ));
+            let summary = tokio::select! {
+                result = &mut running => panic!("qualified summary request missing: {result:?}"),
+                request = server.next() => request,
+            };
+            let body = summary.captured.json();
+            assert_eq!(output(&body), vec![expected]);
+            assert!(
+                body.get("tools")
+                    .is_none_or(|tools| tools.as_array().unwrap().is_empty())
+            );
+            let receipt_output = output(&body).pop().unwrap();
+            assert!(receipt_output.get("output_format").is_none());
+            assert!(receipt_output["output"].as_str().unwrap().len() < 100);
+            summary.respond(completed("receipt-summary", &[json!({"type":"message", "id":"handoff", "role":"assistant", "status":"completed", "content":[{"type":"output_text", "text":"Receipt inspected. Continue the task.", "annotations":[]} ]})]));
+            let continued = tokio::select! {
+                result = &mut running => panic!("post-summary request missing: {result:?}"),
+                request = server.next() => request,
+            };
+            continued.respond(completed("receipt-final", &[assistant()]));
+            tokio::time::timeout(Duration::from_secs(5), &mut running)
+                .await
+                .unwrap()
+                .unwrap();
+            let attempts = store
+                .events(None)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == "compaction_attempt")
+                .collect::<Vec<_>>();
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(attempts[0].payload["outcome"], "applied");
+            assert_eq!(
+                provider
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|operation| operation.call.0.clone())
+                    .collect::<Vec<_>>(),
+                vec!["native01", "trigger02"]
+            );
+            assert_eq!(
+                provider.projection_issuers.lock().unwrap().len(),
+                2,
+                "ordinary and summary requests both consult the exact issuer"
+            );
+        } else {
+            let refused = tokio::select! {
+                result = &mut running => result.expect_err("missing or forged projection must refuse"),
+                request = server.next() => panic!("unqualified receipt reached HTTP: {:?}", request.captured.json()),
+            };
+            let operation = provider.calls.lock().unwrap()[0].clone();
+            match mode {
+                ReceiptProjection::Missing => {
+                    assert!(
+                        matches!(store.model_output_projection(&operation), Err(harness::store::StoreError::MissingModelOutputProjection { operation: denied }) if denied == operation)
+                    );
+                    assert!(matches!(
+                        refused,
+                        harness::engine::EngineError::ProviderCall(_)
+                    ));
+                }
+                ReceiptProjection::Forged => assert!(matches!(
+                    refused,
+                    harness::engine::EngineError::Store(harness::store::StoreError::Context(
+                        harness::context::ContextError::Replay(
+                            harness::context::ContextReplayRejection::InvalidMembership
+                        )
+                    ))
+                )),
+                ReceiptProjection::Valid => unreachable!(),
+            }
+            let attempts = store
+                .events(None)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == "compaction_attempt")
+                .collect::<Vec<_>>();
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(attempts[0].payload["outcome"], "failed");
+            assert_eq!(provider.calls.lock().unwrap().len(), 1);
+        }
+        let operation = provider.calls.lock().unwrap()[0].clone();
+        let canonical = store.replay_output_operation(&operation).unwrap().unwrap();
+        assert_eq!(
+            canonical.output_format().unwrap(),
+            harness::provider::OutputFormat::NativeReceiptV1
+        );
+        let raw: Value = serde_json::from_str(canonical.0["output"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            raw,
+            json!({"raw_receipt":"canonical receipt body ".repeat(8_192)})
+        );
+        assert!(canonical.0["output"].as_str().unwrap().len() > 128 * 1024);
+        server.finish().await;
+    }
+}
