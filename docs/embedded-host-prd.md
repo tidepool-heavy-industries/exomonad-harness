@@ -185,8 +185,8 @@ uncertain side effects blindly.
 The initial embedded compactor uses plain text, following the familiar local
 Codex flow: ask the model for a handoff summary, then seed the next request with
 standing instructions, that summary, and a bounded selection of retained user
-messages. Default the configurable threshold to about 50% of the context limit
-to leave headroom. Keep the summary text as model-authored text; no typed
+messages. The host supplies the explicit reported input-token threshold; the
+Tidepool host defaults it to 500000 tokens. Keep the summary text as model-authored text; no typed
 builder, structured handoff schema, renderer template, or prepare/commit mode in
 this release. The provider compaction strategy remains injectable for later
 experiments.
@@ -315,7 +315,7 @@ Tidepool adapter will consume that revision rather than guessed signatures.
   root. Store owns schema/migrations, the facade owns run identity and startup;
   assets are immutable matched build artifacts. Incompatible schemas fail before
   actor admission. No automatic Codex transcript migration or heap restoration.
-- Plain-text compaction at approximately 50% configured context capacity:
+- Plain-text compaction at the host-configured reported input-token threshold:
   standing instructions, model-authored handoff and bounded recent user messages.
   Pending claims and live resources remain separate. Failure/no-progress retains
   valid history and prevents repeated compaction of unchanged input.
