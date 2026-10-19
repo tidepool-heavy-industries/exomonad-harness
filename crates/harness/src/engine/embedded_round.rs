@@ -377,6 +377,10 @@ impl EngineError {
                     },
                 );
             }
+            Self::RequestPreparationRefused { head_request, .. } => {
+                facts.head = Some(head_request.clone());
+                facts.cleanup_intent = crate::provider::CancellationCause::ProviderFailureCleanup;
+            }
             Self::RequestRejected { head_request, .. } => {
                 facts.execution = RoundExecution::Rejected;
                 facts.cleanup_intent = crate::provider::CancellationCause::ProviderFailureCleanup;
@@ -402,7 +406,10 @@ impl EngineError {
                     crate::embedding::InferenceBlockReason::RequestRejected { .. } => {
                         RoundExecution::Rejected
                     }
-                    crate::embedding::InferenceBlockReason::ProviderStreamFailure { .. }
+                    crate::embedding::InferenceBlockReason::RequestPreparationRefused {
+                        ..
+                    }
+                    | crate::embedding::InferenceBlockReason::ProviderStreamFailure { .. }
                     | crate::embedding::InferenceBlockReason::ResponseIncomplete { .. }
                     | crate::embedding::InferenceBlockReason::ContinuityUnproven
                     | crate::embedding::InferenceBlockReason::HostInterrupted => {

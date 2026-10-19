@@ -139,7 +139,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
         {resolved.actor && <p className="actor-state" role="status">
           {transportPhase !== 'ready' ? 'Connection unavailable · showing retained activity'
             : !['running', 'waiting'].includes(resolved.actor.lifecycle) ? `Read-only · ${resolved.actor.lifecycle}`
-            : resolved.actor.inference?.state === 'blocked' ? 'Response interrupted'
+            : resolved.actor.inference?.state === 'blocked' ? (resolved.actor.inference.block.reason.kind === 'request_preparation_refused' ? 'Request preparation blocked' : 'Response interrupted')
             : resolved.actor.inference?.state === 'auto_retry' ? `Retrying response · attempt ${resolved.actor.inference.attempt} of ${resolved.actor.inference.maximum}`
             : resolved.actor.inference?.state === 'recovering' ? 'Retry requested'
             : resolved.actor.inference?.state === 'running' ? 'Working'

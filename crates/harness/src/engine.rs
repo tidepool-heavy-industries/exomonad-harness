@@ -228,6 +228,12 @@ mod tool_execution_tests;
 
 #[derive(Debug, Error)]
 pub enum EngineError {
+    #[error("local request preparation refused for {head_request:?} on {route:?}: {semantics}")]
+    RequestPreparationRefused {
+        head_request: RequestId,
+        route: crate::transport::ResponsesRoute,
+        semantics: crate::transport::UnsupportedSemantics,
+    },
     #[error("inference is durably blocked: {block:?}")]
     InferenceBlocked {
         block: crate::embedding::InferenceBlock,
@@ -1096,7 +1102,33 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             assessment.cleanup(),
             RoundCleanup::Confirmed | RoundCleanup::ReleasedWithFollowup
         );
-        if assessment.continuity_refused() {
+        if let Err(EngineError::RequestPreparationRefused {
+            head_request,
+            route,
+            semantics,
+        }) = &receipt.result
+        {
+            if assessment.cleanup() == RoundCleanup::Confirmed
+                && assessment.store_continuation() == StoreContinuation::NoReopenRequired
+                && assessment.secondary_failure_stages().is_empty()
+            {
+                let identity = self.embedded_identity().expect("embedded attempt");
+                match self.store.block_embedded_inference(
+                    &identity,
+                    head_request,
+                    crate::embedding::InferenceBlockReason::RequestPreparationRefused {
+                        route: *route,
+                        semantics: *semantics,
+                    },
+                ) {
+                    Ok(block) => receipt
+                        .inference
+                        .push(InferenceObligation::RecoverBlock { block }),
+                    Err(source) => receipt
+                        .add_failure(RoundFailureStage::InferenceBlockRecording, source.into()),
+                }
+            }
+        } else if assessment.continuity_refused() {
             let identity = self.embedded_identity().expect("embedded attempt");
             let recording = (|| {
                 let frontier = self.store.embedded_round_frontier(&identity)?;
@@ -1918,6 +1950,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let seal_head = parent.clone();
             let (mut req, provider_request) = match blocking(move || {
                 let instructions = store.intern_replay_instructions(&req.instructions)?;
+                let route = contract.response_contract().0;
                 let prepared = store
                     .prepare_provider_request(
                         &seal_head,
@@ -1928,14 +1961,25 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         contract,
                         crate::store::ProviderRequestPurpose::Inference,
                     )
-                    .map_err(StoreError::from)?;
-                let provider_request = prepared.issuer().clone();
-                Ok((prepared, provider_request))
+                    .map_err(|error| match error {
+                        crate::store::PrepareProviderError::Transport(
+                            TransportError::UnsupportedSemantics(semantics),
+                        ) => EngineError::RequestPreparationRefused {
+                            head_request: seal_head,
+                            route,
+                            semantics,
+                        },
+                        other => EngineError::from(StoreError::from(other)),
+                    });
+                Ok(prepared.map(|prepared| {
+                    let provider_request = prepared.issuer().clone();
+                    (prepared, provider_request)
+                }))
             })
             .await
             {
-                Ok(sealed) => sealed,
-                Err(error) => return Err(error),
+                Ok(Ok(sealed)) => sealed,
+                Ok(Err(error)) | Err(error) => return Err(error),
             };
             if let Some(started) = request_preparation_started {
                 tracing::debug!(target: "harness::runtime_cost", request_id = %parent.0,
@@ -5120,6 +5164,10 @@ async fn blocking<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    mod preparation_refusal_tests {
+        use super::*;
+        include!("engine/preparation_refusal_tests.rs");
+    }
     use super::*;
     use crate::agents::{AgentInvocation, AgentToolService, dispatch_agent_verb};
 

@@ -39,13 +39,17 @@ export default function RecoveryControls({ target, block, ready, submit, onResul
     if (result.kind === 'retained') { focusIntent.current = 'status'; setOperation({ target, block, id: result.operationId }); setConfirmation(undefined) }
     onResult(result)
   }
-  return <section ref={section} tabIndex={-1} className="inference-recovery" aria-label="Response interrupted">
-    <div className="response-interrupted-heading"><h3>Response interrupted</h3>
-      <button type="button" disabled={!ready || !submit || !!pendingVisible || (submitted && !pendingExact) || (!!pendingExact && !retry) || continuationFailure === 'uncertain_effects'} onClick={() => resume('exact')}>Retry</button></div>
+  const preparation = block.reason.kind === 'request_preparation_refused' ? block.reason : undefined
+  const heading = preparation ? 'Request preparation blocked' : 'Response interrupted'
+  return <section ref={section} tabIndex={-1} className="inference-recovery" aria-label={heading}>
+    <div className="response-interrupted-heading"><h3>{heading}</h3>
+      <button type="button" disabled={!ready || !submit || !!pendingVisible || (submitted && !pendingExact) || (!!pendingExact && !retry) || continuationFailure === 'uncertain_effects'} onClick={() => resume('exact')}>{preparation ? 'Retry after correction' : 'Retry'}</button></div>
+    {preparation && <p>The provider request could not be prepared locally. No provider request was sent. Correct the context, provider selection, or software before retrying. Your messages remain queued.</p>}
     {diagnostic?.code === 'subscription_sharing_usage_limit_exceeded' && <p>The provider reports that the account’s subscription sharing usage limit was reached. Select another saved model account, then retry.</p>}
 
     <details><summary>Details</summary>
       <p>Reason: {block.reason.kind.replaceAll('_', ' ')}</p>
+      {preparation && <p>Provider route: {preparation.route} · unsupported semantics: {preparation.semantics}</p>}
       {block.reason.kind === 'provider_stream_failure' && <>
         <p>Provider stream event: {block.reason.event === 'response_failed' ? 'response.failed' : 'error'}</p>
         {diagnostic?.message && <p>{diagnostic.message}</p>}

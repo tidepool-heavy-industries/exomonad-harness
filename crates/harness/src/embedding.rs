@@ -107,6 +107,10 @@ pub struct InferenceBlock {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InferenceBlockReason {
+    RequestPreparationRefused {
+        route: crate::transport::ResponsesRoute,
+        semantics: crate::transport::UnsupportedSemantics,
+    },
     StreamInterrupted {
         cause: crate::transport::StreamInterruption,
     },

@@ -241,6 +241,7 @@ export function sameInferenceBlock(left: InferenceBlock, right: InferenceBlock):
   if (left.request !== right.request || left.generation !== right.generation || (left.continuationRefusal ?? null) !== (right.continuationRefusal ?? null) || left.reason.kind !== right.reason.kind) return false;
   const a = left.reason, b = right.reason;
   switch (a.kind) {
+    case 'request_preparation_refused': return b.kind === a.kind && a.route === b.route && a.semantics === b.semantics;
     case 'stream_interrupted': return b.kind === a.kind && a.cause === b.cause;
     case 'provider_stream_failure': return b.kind === a.kind && a.event === b.event && sameDiagnostic(a.diagnostic, b.diagnostic);
     case 'request_rejected': {

@@ -439,6 +439,14 @@ pub(super) fn admit_input_continuation_tx(
     let (_, state) = initialize(tx, identity)?;
     let (attempt, outcome) = match state {
         Gate::Running { attempt, .. } => (Some(attempt), InputContinuation::Queued),
+        Gate::Blocked { block }
+            if matches!(
+                block.reason,
+                InferenceBlockReason::RequestPreparationRefused { .. }
+            ) =>
+        {
+            (None, InputContinuation::Queued)
+        }
         Gate::Blocked { block } | Gate::AutoRetry { block, .. } => (
             None,
             checked_exact_grant(tx, identity, &block, operation, store_id)?,
@@ -670,6 +678,7 @@ impl Store {
             expire_intents(tx, identity, &attempt.attempt)?;
             if !eligible { return Ok(false); }
             let Gate::Blocked { block } = state else { return Ok(false); };
+            if matches!(block.reason, InferenceBlockReason::RequestPreparationRefused { .. }) { return Ok(false); }
             Ok(matches!(checked_exact_grant(tx, identity, &block, ClientOperationId(uuid::Uuid::new_v4()), &self.store_id)?, crate::embedding::InputContinuation::Granted { .. }))
         })
     }
@@ -789,6 +798,10 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    mod preparation_refusal_tests {
+        use super::*;
+        include!("inference_preparation_tests.rs");
+    }
     use super::*;
     use crate::{
         embedding::RecoveryMode,
