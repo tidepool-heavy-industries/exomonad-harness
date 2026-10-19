@@ -1180,19 +1180,27 @@ async fn http_sync_group_delivers_fifo_inputs_after_all_outputs_and_preserves_ca
                 result = &mut running => panic!("round ended before actual output publication: {result:?}"),
                 value = tokio::time::timeout(Duration::from_secs(5), committed.recv()) => value.unwrap().unwrap(),
             };
-            assert_eq!(operation.call, CallId("call01".into()));
+            let invocation = store
+                .invocation_item(&operation.request, &operation.call)
+                .unwrap()
+                .expect("actual issued invocation");
+            assert_eq!(invocation.call_id, operation.call);
+            assert_eq!(invocation.name, "haskell");
+            // The installed custom source is decoded for the provider, but the
+            // DeepSeek invocation and its canonical reply remain a function pair.
+            assert!(matches!(invocation.input, ToolInput::Function(_)));
             let retained = store
                 .replay_tool_output_operation(&operation)
                 .unwrap()
                 .expect("commit callback requires durable terminal");
             assert_eq!(retained.terminal, TerminalOutcome::Success);
+            assert_eq!(retained.item.0["type"], "function_call_output");
+            assert_eq!(retained.item.0["call_id"], invocation.call_id.0);
             assert!(
                 store
                     .items(&operation.request)
                     .unwrap()
-                    .iter()
-                    .any(|item| item.0["type"] == "custom_tool_call_output"
-                        && item.0["call_id"] == "call01")
+                    .contains(&retained.item)
             );
             // The other synchronous operation is still held; admission has not
             // needed to wait for its provider future or this durable terminal.
