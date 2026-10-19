@@ -1410,7 +1410,7 @@ async fn http_repeated_plain_text_compaction_preserves_native_developer_and_syst
         json!({"type":"message", "role":"developer", "content":"Editable developer context"});
     let human_marker = "[plain-text-compaction-v1] genuine user message";
     let recent_user = "Continue the two-step task";
-    let engine = Engine::with_transport(
+    let engine = Engine::<DeepSeekAuth, _, _>::with_transport(
         ResponsesClient::new(auth),
         store.clone(),
         Arc::new(JobScheduler::new(1).unwrap()),
