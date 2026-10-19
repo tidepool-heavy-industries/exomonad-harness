@@ -1811,7 +1811,10 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
                 .filter(|event| event.kind == "compaction_attempt")
                 .collect::<Vec<_>>();
             assert_eq!(attempts.len(), 1);
-            assert_eq!(attempts[0].payload["outcome"], "applied");
+            assert_eq!(
+                serde_json::from_str::<Value>(&attempts[0].payload).unwrap()["outcome"],
+                "applied"
+            );
             assert_eq!(
                 provider
                     .calls
@@ -1860,7 +1863,10 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
                 .filter(|event| event.kind == "compaction_attempt")
                 .collect::<Vec<_>>();
             assert_eq!(attempts.len(), 1);
-            assert_eq!(attempts[0].payload["outcome"], "failed");
+            assert_eq!(
+                serde_json::from_str::<Value>(&attempts[0].payload).unwrap()["outcome"],
+                "failed"
+            );
             assert_eq!(provider.calls.lock().unwrap().len(), 1);
         }
         let operation = provider.calls.lock().unwrap()[0].clone();
