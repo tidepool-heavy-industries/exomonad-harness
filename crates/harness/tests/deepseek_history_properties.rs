@@ -191,6 +191,7 @@ impl Provider for Editor {
 }
 
 struct Application {
+    committed: Option<mpsc::UnboundedSender<OperationId>>,
     identity: HostIdentity,
     surface: Arc<ToolSurface>,
 }
@@ -214,6 +215,14 @@ impl HostActor for Application {
     }
     async fn control(&self, _: HostControl) -> Result<Value, HostControlError> {
         panic!("application fixture does not exercise Exomonad actor lifecycle");
+    }
+    async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
+        if let Some(committed) = &self.committed {
+            committed
+                .send(operation.clone())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -412,6 +421,7 @@ async fn http_reasoning_transactions_preserve_originals_across_edit_refusal_and_
         "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}})],
         HashMap::from([("edit".into(), ToolScheduling::BeforeNextInference)])).unwrap();
     let application = Arc::new(Application {
+        committed: None,
         identity: HostIdentity {
             run: "offline-context".into(),
             actor: AgentPath("/root".into()),
@@ -713,6 +723,7 @@ async fn run_exchange_history(actions: &[(ExchangeEdit, bool)]) {
     )
     .unwrap();
     let application = Arc::new(Application {
+        committed: None,
         identity: HostIdentity {
             run: "offline-exchange".into(),
             actor: AgentPath("/root".into()),
@@ -1047,7 +1058,9 @@ async fn http_sync_group_delivers_fifo_inputs_after_all_outputs_and_preserves_ca
             HashMap::from([("haskell".into(), ToolScheduling::BeforeNextInference)]),
             HashMap::from([("haskell".into(), "code".into())]),
         ).unwrap();
+        let (committed_tx, mut committed) = mpsc::unbounded_channel();
         let application = Arc::new(Application {
+            committed: Some(committed_tx),
             identity: HostIdentity {
                 run: "sync-group".into(),
                 actor: AgentPath("/root".into()),
@@ -1162,6 +1175,38 @@ async fn http_sync_group_delivers_fifo_inputs_after_all_outputs_and_preserves_ca
             first_finished,
             if haskell_first { "haskell" } else { "status" }
         );
+        if haskell_first {
+            let operation = tokio::select! {
+                result = &mut running => panic!("round ended before actual output publication: {result:?}"),
+                value = tokio::time::timeout(Duration::from_secs(5), committed.recv()) => value.unwrap().unwrap(),
+            };
+            assert_eq!(operation.call, CallId("call01".into()));
+            let retained = store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .expect("commit callback requires durable terminal");
+            assert_eq!(retained.terminal, TerminalOutcome::Success);
+            assert!(
+                store
+                    .items(&operation.request)
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.0["type"] == "custom_tool_call_output"
+                        && item.0["call_id"] == "call01")
+            );
+            // The other synchronous operation is still held; admission has not
+            // needed to wait for its provider future or this durable terminal.
+            for id in [one.envelope_id, two.envelope_id] {
+                assert!(
+                    store
+                        .envelope(id)
+                        .unwrap()
+                        .unwrap()
+                        .delivered_request
+                        .is_none()
+                );
+            }
+        }
         if cancel {
             cancel_tx.send(true).unwrap();
             let settled = tokio::time::timeout(Duration::from_secs(5), running)
@@ -1214,8 +1259,9 @@ async fn http_sync_group_delivers_fifo_inputs_after_all_outputs_and_preserves_ca
                     .iter()
                     .enumerate()
                     .filter(|(_, item)| {
-                        item["role"] == "user"
-                            && serde_json::to_string(item).unwrap().contains(text)
+                        item["type"] == "message"
+                            && item["role"] == "user"
+                            && item.get("content").and_then(Value::as_str) == Some(text)
                     })
                     .map(|(index, _)| index)
                     .collect::<Vec<_>>();
