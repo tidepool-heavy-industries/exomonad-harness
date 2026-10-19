@@ -1889,14 +1889,17 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
                         harness::engine::EngineError::ProviderCall(_)
                     ));
                 }
-                ReceiptProjection::Foreign => assert!(matches!(
-                    refused,
-                    harness::engine::EngineError::Store(harness::store::StoreError::Context(
-                        harness::context::ContextError::Replay(
-                            harness::context::ContextReplayRejection::InvalidMembership
-                        )
-                    ))
-                )),
+                ReceiptProjection::Foreign => assert!(
+                    matches!(
+                        &refused,
+                        harness::engine::EngineError::Store(harness::store::StoreError::Context(
+                            harness::context::ContextError::Replay(
+                                harness::context::ContextReplayRejection::InvalidMembership
+                            )
+                        ))
+                    ),
+                    "{refused:?}"
+                ),
                 ReceiptProjection::Valid => unreachable!(),
             }
             let attempts = store
