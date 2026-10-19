@@ -551,13 +551,14 @@ impl Conversation {
 
     /// Construct the model loop for this binding. The host manifest supplies
     /// provider tools; Engine adds its reserved continuation intrinsic. The
-    /// caller supplies shared Store/scheduler infrastructure.
+    /// caller supplies shared Store/scheduler infrastructure and the explicit
+    /// input-token threshold for plain-text compaction.
     pub fn engine<A: crate::transport::Auth, C: crate::engine::ResponsesTransport>(
         &self,
         transport: C,
         scheduler: Arc<crate::turn::JobScheduler>,
         config: crate::engine::EngineConfig,
-        context_capacity: std::num::NonZeroU64,
+        compaction_input_tokens: std::num::NonZeroU64,
     ) -> Result<crate::engine::Engine<A, BoundProvider, C>, EmbeddedError> {
         if config.agent != self.identity().actor || !config.tools.is_empty() {
             return Err(EmbeddedError::Binding(
@@ -585,7 +586,7 @@ impl Conversation {
             config,
         )
         .with_origin(origin)
-        .with_plain_text_compaction(context_capacity))
+        .with_plain_text_compaction(compaction_input_tokens))
     }
     pub fn active_round(&self) -> Option<EmbeddedRoundId> {
         self.host.active_round()

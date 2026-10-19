@@ -732,9 +732,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         self
     }
 
-    /// Opt into plain-text handoffs near half the configured context capacity.
-    pub fn with_plain_text_compaction(mut self, context_capacity_tokens: NonZeroU64) -> Self {
-        self.compact_at_input_tokens = Some(context_capacity_tokens.get().div_ceil(2));
+    /// Opt into plain-text handoffs at the reported input-token threshold.
+    pub fn with_plain_text_compaction(mut self, input_tokens: NonZeroU64) -> Self {
+        self.compact_at_input_tokens = Some(input_tokens.get());
         self.compaction_strategy = CompactionStrategy::PlainText;
         self
     }
@@ -9002,7 +9002,7 @@ mod tests {
             let engine = match strategy {
                 CompactionStrategy::Server => engine.with_compaction_threshold(1),
                 CompactionStrategy::PlainText => engine.with_plain_text_compaction(
-                    std::num::NonZeroU64::new(2).expect("positive context capacity"),
+                    std::num::NonZeroU64::new(1).expect("positive compaction input threshold"),
                 ),
             };
             let (_cancel_tx, cancel_rx) = watch::channel(false);

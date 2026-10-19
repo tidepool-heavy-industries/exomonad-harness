@@ -58,8 +58,8 @@ head before subsequent work. These repairs have production-path regression cover
   own checkout. Failed or cancelled source work does not invalidate the handle;
   shared call cancellation is observed by every claimant, not cloned or replayed.
   Reopening Store cannot resurrect a live attachment.
-- `Engine::with_plain_text_compaction(NonZeroU64)` triggers near half the configured
-  capacity. Pending raw/function calls remain exact, outside summary text. Summary
+- `Engine::with_plain_text_compaction(NonZeroU64)` takes the explicit reported
+  input-token threshold. Pending raw/function calls remain exact, outside summary text. Summary
   tool calls are refused. Failed/no-progress attempts retain history and require
   meaningful growth before retry; request IDs, usage and outcomes are recorded.
 - Existing `server_with_config` now includes protected paged request history.

@@ -11,7 +11,10 @@ struct Offline;
 impl Auth for Offline {
     fn admission(
         &self,
-    ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+    ) -> std::result::Result<
+        crate::transport::NativeTransportAdmission,
+        crate::transport::TransportError,
+    > {
         crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
             "/offline/synthetic-credential",
         ))
@@ -1091,7 +1094,7 @@ async fn embedded_restart_recovers_actual_internal_compaction_without_reexecutin
             actor: old.actor.clone(),
             incarnation: old.incarnation.clone(),
         })
-        .with_plain_text_compaction(NonZeroU64::new(100).unwrap());
+        .with_plain_text_compaction(NonZeroU64::new(50).unwrap());
         let (_cancel, cancel) = watch::channel(false);
         let mut task = tokio::spawn(async move {
             runtime

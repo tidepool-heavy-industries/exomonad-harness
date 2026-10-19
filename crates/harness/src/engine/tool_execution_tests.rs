@@ -8,7 +8,10 @@ struct Offline;
 impl Auth for Offline {
     fn admission(
         &self,
-    ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+    ) -> std::result::Result<
+        crate::transport::NativeTransportAdmission,
+        crate::transport::TransportError,
+    > {
         crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
             "/offline/synthetic-credential",
         ))
@@ -767,7 +770,7 @@ async fn server_and_text_compaction_capture_published_prompt_generation() {
             },
         );
         let engine = if text_summary {
-            engine.with_plain_text_compaction(std::num::NonZeroU64::new(3).unwrap())
+            engine.with_plain_text_compaction(std::num::NonZeroU64::new(2).unwrap())
         } else {
             engine.with_compaction_threshold(3)
         };

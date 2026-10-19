@@ -132,7 +132,7 @@ fn engine(turns: Vec<Result<ResponsesTurn, TransportError>>) -> EngineFixture {
             agent: AgentPath("/root".into()),
         },
     )
-    .with_plain_text_compaction(NonZeroU64::new(800).unwrap());
+    .with_plain_text_compaction(NonZeroU64::new(400).unwrap());
     (engine, store, requests)
 }
 
@@ -167,6 +167,52 @@ async fn run(engine: &Engine<OfflineAuth, Echo, Replay>) -> harness::engine::Eng
     let (_tx, rx) = watch::channel(false);
     let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::unbounded_channel();
     engine.run(None, input(), rx, inbox_rx).await.unwrap()
+}
+
+#[tokio::test]
+async fn plain_text_compaction_uses_the_exact_reported_input_threshold() {
+    for reported in [499_999, 500_000, 500_001] {
+        let should_compact = reported >= 500_000;
+        let mut first = turn("first", vec![call()]).unwrap();
+        first.usage.input_tokens = Some(reported);
+        let mut turns = vec![Ok(first)];
+        if should_compact {
+            turns.push(turn(
+                "summary",
+                vec![Item(json!({
+                    "type":"message", "role":"assistant", "content":"Finish Echo."
+                }))],
+            ));
+        }
+        turns.push(turn("final", vec![final_answer()]));
+        let (engine, store, requests) = engine(turns);
+        let engine = engine.with_plain_text_compaction(NonZeroU64::new(500_000).unwrap());
+        let completion = run(&engine).await;
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            if should_compact { 3 } else { 2 },
+            "{reported}"
+        );
+        assert_eq!(
+            compacted(&store, &completion.head_request),
+            should_compact,
+            "{reported}"
+        );
+        if should_compact {
+            assert!(requests[1].tools.is_empty());
+            assert_eq!(requests[1].tools_allowed, Some(vec![]));
+            assert_eq!(attempt(&store)["outcome"], "applied");
+        } else {
+            assert!(
+                !store
+                    .events(None)
+                    .unwrap()
+                    .iter()
+                    .any(|event| event.kind == "compaction_attempt")
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -354,7 +400,7 @@ async fn pending_custom_call_survives_handoff_and_receives_late_output() {
             agent: AgentPath("/root".into()),
         },
     )
-    .with_plain_text_compaction(NonZeroU64::new(800).unwrap());
+    .with_plain_text_compaction(NonZeroU64::new(400).unwrap());
     let release_requests = requests.clone();
     let release = async move {
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
