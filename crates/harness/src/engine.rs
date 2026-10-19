@@ -1588,17 +1588,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 .await?;
         }
         recovery_cleanup.clear();
-        if admit_inbox {
-            let store = self.store.clone();
-            let recipient = self.config.agent.clone();
-            let request = id.clone();
-            blocking(move || {
-                store
-                    .append_unread_envelopes(&recipient, &request)
-                    .map(|_| ())
-            })
-            .await?;
-        }
         let mut parent = id.clone();
         let mut compact_due = false;
         let mut previous_usage = Usage::default();
@@ -1619,9 +1608,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             {
                 return Err(error);
             }
-            // AtBoundary is a property of *every* model request, not of a
-            // completed turn. Admission is a Store transaction and neither
-            // polls nor cancels an in-flight provider Job.
+            // Durable admission stays immediate, but inbox projection belongs
+            // to this inference boundary: every synchronous response operation
+            // now has its output committed, including Async-scheduled wait calls.
+            // True background operations remain independently scheduled.
             if admit_inbox {
                 if let Err(error) = self.append_unread_envelopes(&parent).await {
                     return Err(error);
@@ -1671,6 +1661,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     *observed_head = Some(parent.clone());
                 }
             }
+            // Compaction starts only after synchronous settlement above and
+            // creates no response operations. Refresh delivery at the same safe
+            // boundary for inputs admitted while compaction was running.
             if did_compact && admit_inbox {
                 if let Err(error) = self.append_unread_envelopes(&parent).await {
                     return Err(error);
@@ -2405,13 +2398,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             // the next call can inspect the canonical prefix.
             let had_sync_calls = pending.iter().any(|call| call.queued);
             let activation_terminal = match self
-                .execute_sync_calls(
-                    pending,
-                    &mut parent,
-                    &turn.items,
-                    &mut cancellation,
-                    admit_inbox,
-                )
+                .execute_sync_calls(pending, &mut parent, &turn.items, &mut cancellation)
                 .await
             {
                 Ok(terminal) => terminal,
@@ -2659,11 +2646,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 if let Err(error) =
                     blocking(move || store.apply_pending_effort(&agent, &request)).await
                 {
-                    return Err(error);
-                }
-            }
-            if admit_inbox {
-                if let Err(error) = self.append_unread_envelopes(&next_id).await {
                     return Err(error);
                 }
             }
@@ -3475,7 +3457,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         request: &mut RequestId,
         response: &[Item],
         cancellation: &mut watch::Receiver<bool>,
-        admit_inbox: bool,
     ) -> Result<bool, EngineError> {
         let operations = response
             .iter()
@@ -3731,9 +3712,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
             pending.retain(|call| call.operation != operation);
             activation_terminal |= terminal;
-            if admit_inbox && !activation_terminal {
-                self.append_unread_envelopes(request).await?;
-            }
         }
         Ok(activation_terminal)
     }
@@ -4306,11 +4284,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             .await?;
             pending.retain(|call| call.operation != *wait_call);
         }
-        if durable_mailbox {
-            // The wake envelope is only a hint. Its persisted inbox row is
-            // attached transactionally after outputs and wait status.
-            self.append_unread_envelopes(request).await?;
-        } else {
+        if !durable_mailbox {
+            // Legacy ephemeral envelopes have no durable inbox row. Durable
+            // wakes remain hints; the inference boundary attaches their rows
+            // only after all synchronous response operations have settled.
             if let Some(item) = agent_envelope {
                 self.append(request, vec![item]).await?;
             }

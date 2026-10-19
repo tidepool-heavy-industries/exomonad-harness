@@ -978,3 +978,297 @@ proptest! {
         runtime.block_on(run_exchange_history(&actions));
     }
 }
+
+/// The host scheduling axis is independent of the model's delivery envelope.
+struct GroupTools {
+    started: mpsc::UnboundedSender<String>,
+    finished: mpsc::UnboundedSender<String>,
+    status: tokio::sync::Notify,
+    haskell: tokio::sync::Notify,
+    calls: Mutex<Vec<OperationId>>,
+}
+
+#[async_trait]
+impl Provider for GroupTools {
+    fn tools(&self) -> Vec<Value> {
+        vec![]
+    }
+
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        panic!("group tools require their actual invocation context")
+    }
+
+    async fn complete_call(
+        &self,
+        name: &str,
+        input: ToolInput,
+        context: CallContext,
+    ) -> ProviderCompletion {
+        match name {
+            "status" => assert_eq!(input, ToolInput::Function(json!({}))),
+            "haskell" => assert_eq!(input, ToolInput::Custom("pure 42".into())),
+            _ => panic!("unexpected tool {name}"),
+        }
+        self.calls.lock().unwrap().push(context.operation.unwrap());
+        self.started.send(name.into()).unwrap();
+        match name {
+            "status" => self.status.notified().await,
+            "haskell" => self.haskell.notified().await,
+            _ => unreachable!(),
+        }
+        self.finished.send(name.into()).unwrap();
+        ProviderCompletion::unedited(Ok(json!({"completed":name})))
+    }
+}
+
+#[tokio::test]
+async fn http_sync_group_delivers_fifo_inputs_after_all_outputs_and_preserves_cancelled_inbox() {
+    for (haskell_first, cancel) in [(true, false), (false, false), (true, true)] {
+        let mut server = LocalResponses::start().await;
+        let files = Files::new();
+        let auth = files.auth(&server.endpoint);
+        let path = files.0.join("sync-group.sqlite");
+        let store = Arc::new(Store::open(&path).unwrap());
+        let (started_tx, mut started) = mpsc::unbounded_channel();
+        let (finished_tx, mut finished) = mpsc::unbounded_channel();
+        let tools = Arc::new(GroupTools {
+            started: started_tx,
+            finished: finished_tx,
+            status: tokio::sync::Notify::new(),
+            haskell: tokio::sync::Notify::new(),
+            calls: Mutex::new(vec![]),
+        });
+        let manifest = EmbeddedToolManifest::with_text_fields(
+            vec![
+                json!({"type":"function","name":"status","strict":true,
+                    "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}),
+                json!({"type":"custom","name":"haskell","format":{"type":"text"}}),
+            ],
+            HashMap::from([("haskell".into(), ToolScheduling::BeforeNextInference)]),
+            HashMap::from([("haskell".into(), "code".into())]),
+        ).unwrap();
+        let application = Arc::new(Application {
+            identity: HostIdentity {
+                run: "sync-group".into(),
+                actor: AgentPath("/root".into()),
+                incarnation: "issued".into(),
+            },
+            surface: Arc::new(
+                ToolSurface::from_manifest("group-v1".into(), Arc::new(manifest), tools.clone())
+                    .unwrap(),
+            ),
+        });
+        let conversation = Conversation::attach(store.clone(), application, None)
+            .await
+            .unwrap();
+        conversation
+            .input("initial", "operator", "initial group")
+            .await
+            .unwrap();
+        let scheduler = Arc::new(JobScheduler::new(2).unwrap());
+        let engine = conversation
+            .engine::<DeepSeekAuth, _>(
+                ResponsesClient::new(auth),
+                scheduler,
+                EngineConfig {
+                    instructions: "offline response group".into(),
+                    tools: vec![],
+                    model: "deepseek-flash".into(),
+                    effort: Effort::High,
+                    session_id: "sync-group".into(),
+                    agent: conversation.identity().actor.clone(),
+                },
+                NonZeroU64::new(1_000_000).unwrap(),
+            )
+            .unwrap();
+        let mut driver = engine.into_embedded_rounds().unwrap();
+        let EmbeddedRoundReadiness::Selected(selection) = driver.next_round().unwrap() else {
+            panic!("initial input selects round")
+        };
+        let (cancel_tx, cancellation) = watch::channel(false);
+        let (_wake, incoming) = mpsc::unbounded_channel();
+        let running = driver.run_round(selection, cancellation, incoming);
+        tokio::pin!(running);
+        let first = tokio::select! {
+            result = &mut running => panic!("missing first request: {result:?}"),
+            request = server.next() => request,
+        };
+        let wire = first.captured.json();
+        let declared = wire["tools"].as_array().unwrap();
+        assert!(declared.iter().any(|tool| tool["name"] == "status"
+            && tool["parameters"]["properties"]["delivery"]["enum"]
+                == json!(["wait", "background"])));
+        first.respond(completed("sync-group-first", &[
+            reasoning(),
+            json!({"type":"function_call","id":"status-item","call_id":"call00","name":"status",
+                "arguments":json!({"arguments":{},"delivery":"wait"}).to_string()}),
+            json!({"type":"function_call","id":"haskell-item","call_id":"call01","name":"haskell",
+                "arguments":json!({"code":"pure 42"}).to_string()}),
+        ]));
+        let mut actual_starts = Vec::new();
+        for _ in 0..2 {
+            actual_starts.push(tokio::select! {
+                result = &mut running => panic!("round ended before tools started: {result:?}"),
+                value = tokio::time::timeout(Duration::from_secs(5), started.recv()) => value.unwrap().unwrap(),
+            });
+        }
+        actual_starts.sort();
+        assert_eq!(actual_starts, ["haskell", "status"]);
+        let one = tokio::time::timeout(
+            Duration::from_secs(5),
+            conversation.input("queued-one", "operator", "queued first"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let two = tokio::time::timeout(
+            Duration::from_secs(5),
+            conversation.input("queued-two", "operator", "queued second"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let replay = conversation
+            .input("queued-one", "operator", "queued first")
+            .await
+            .unwrap();
+        assert_eq!(one.envelope_id, replay.envelope_id);
+        assert!(
+            store
+                .envelope(one.envelope_id)
+                .unwrap()
+                .unwrap()
+                .delivered_request
+                .is_none()
+        );
+        assert!(
+            store
+                .envelope(two.envelope_id)
+                .unwrap()
+                .unwrap()
+                .delivered_request
+                .is_none()
+        );
+        if haskell_first {
+            tools.haskell.notify_one();
+        } else {
+            tools.status.notify_one();
+        }
+        let first_finished = tokio::select! {
+            result = &mut running => panic!("round ended with another tool held: {result:?}"),
+            value = tokio::time::timeout(Duration::from_secs(5), finished.recv()) => value.unwrap().unwrap(),
+        };
+        assert_eq!(
+            first_finished,
+            if haskell_first { "haskell" } else { "status" }
+        );
+        if cancel {
+            cancel_tx.send(true).unwrap();
+            let settled = tokio::time::timeout(Duration::from_secs(5), running)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                settled.assessment().execution(),
+                RoundExecution::Cancelled,
+                "{settled:?}"
+            );
+            let reopened = Store::open(&path).unwrap();
+            for id in [one.envelope_id, two.envelope_id] {
+                assert!(
+                    reopened
+                        .envelope(id)
+                        .unwrap()
+                        .unwrap()
+                        .delivered_request
+                        .is_none(),
+                    "cancellation must preserve queued durable input"
+                );
+            }
+        } else {
+            if haskell_first {
+                tools.status.notify_one();
+            } else {
+                tools.haskell.notify_one();
+            }
+            let next = tokio::select! {
+                result = &mut running => panic!("missing next request: {result:?}"),
+                request = server.next() => request,
+            };
+            let body = next.captured.json();
+            let input = body["input"].as_array().unwrap();
+            let output_position = |call: &str| {
+                let matches = input
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| {
+                        item["type"] == "function_call_output" && item["call_id"] == call
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                assert_eq!(matches.len(), 1, "one durable output for {call}: {input:?}");
+                matches[0]
+            };
+            let user_position = |text: &str| {
+                let matches = input
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| {
+                        item["role"] == "user"
+                            && serde_json::to_string(item).unwrap().contains(text)
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    matches.len(),
+                    1,
+                    "each admitted user appears once: {input:?}"
+                );
+                matches[0]
+            };
+            let first_user = user_position("queued first");
+            assert!(
+                output_position("call00") < first_user,
+                "status output must precede new user input"
+            );
+            assert!(
+                output_position("call01") < first_user,
+                "haskell output must precede new user input"
+            );
+            assert!(
+                first_user < user_position("queued second"),
+                "durable admission FIFO"
+            );
+            for id in [one.envelope_id, two.envelope_id] {
+                assert!(
+                    store
+                        .envelope(id)
+                        .unwrap()
+                        .unwrap()
+                        .delivered_request
+                        .is_some()
+                );
+            }
+            next.respond(completed("sync-group-final", &[assistant()]));
+            let settled = tokio::time::timeout(Duration::from_secs(5), running)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                settled.assessment().execution(),
+                RoundExecution::Completed,
+                "{settled:?}"
+            );
+        }
+        let calls = tools.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_ne!(calls[0], calls[1]);
+        let ids = calls
+            .iter()
+            .map(|operation| operation.call.0.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids, std::collections::BTreeSet::from(["call00", "call01"]));
+        drop(calls);
+        server.finish().await;
+    }
+}
