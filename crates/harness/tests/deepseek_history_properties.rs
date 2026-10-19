@@ -1581,7 +1581,7 @@ async fn http_repeated_plain_text_compaction_preserves_native_developer_and_syst
 enum ReceiptProjection {
     Valid,
     Missing,
-    Forged,
+    Foreign,
 }
 
 struct ReceiptTools {
@@ -1666,13 +1666,16 @@ impl Provider for ReceiptTools {
             .lock()
             .unwrap()
             .push(request.clone());
-        let mut candidate = self
+        let source_operation =
+            if self.mode == ReceiptProjection::Foreign && operation.call.0 == "native02" {
+                self.calls.lock().unwrap()[0].clone()
+            } else {
+                operation
+            };
+        let candidate = self
             .store
-            .model_output_projection(&operation)
+            .model_output_projection(&source_operation)
             .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
-        if self.mode == ReceiptProjection::Forged {
-            candidate.as_mut().unwrap().item.0["output"] = json!("unissued replacement");
-        }
         Ok(candidate)
     }
 }
@@ -1682,7 +1685,7 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
     for mode in [
         ReceiptProjection::Valid,
         ReceiptProjection::Missing,
-        ReceiptProjection::Forged,
+        ReceiptProjection::Foreign,
     ] {
         let mut server = LocalResponses::start().await;
         let files = Files::new();
@@ -1752,35 +1755,41 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
         first.respond(completed_with_usage(
             "receipt-response",
             &[call("native01", "receipt")],
-            Some(if mode == ReceiptProjection::Valid {
-                1
-            } else {
+            Some(if mode == ReceiptProjection::Missing {
                 100
+            } else {
+                1
             }),
         ));
-        if mode == ReceiptProjection::Valid {
+        let expected = json!({"type":"function_call_output", "call_id":"native01", "output":"{\"approved\":\"compact annotation\"}"});
+        let output = |body: &Value| {
+            body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| {
+                    item["type"] == "function_call_output" && item["call_id"] == "native01"
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if mode != ReceiptProjection::Missing {
             let normal = tokio::select! {
                 result = &mut running => panic!("ordinary projected request missing: {result:?}"),
                 request = server.next() => request,
             };
-            let expected = json!({"type":"function_call_output", "call_id":"native01", "output":"{\"approved\":\"compact annotation\"}"});
-            let output = |body: &Value| {
-                body["input"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|item| {
-                        item["type"] == "function_call_output" && item["call_id"] == "native01"
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            };
             assert_eq!(output(&normal.captured.json()), vec![expected.clone()]);
             normal.respond(completed_with_usage(
                 "trigger-response",
-                &[call("trigger02", "trigger")],
+                &[if mode == ReceiptProjection::Valid {
+                    call("trigger02", "trigger")
+                } else {
+                    call("native02", "receipt")
+                }],
                 Some(100),
             ));
+        }
+        if mode == ReceiptProjection::Valid {
             let summary = tokio::select! {
                 result = &mut running => panic!("qualified summary request missing: {result:?}"),
                 request = server.next() => request,
@@ -1832,7 +1841,7 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
             );
         } else {
             let refused = tokio::select! {
-                result = &mut running => result.expect_err("missing or forged projection must refuse"),
+                result = &mut running => result.expect_err("missing or foreign projection must refuse"),
                 request = server.next() => panic!("unqualified receipt reached HTTP: {:?}", request.captured.json()),
             };
             let operation = provider.calls.lock().unwrap()[0].clone();
@@ -1846,7 +1855,7 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
                         harness::engine::EngineError::ProviderCall(_)
                     ));
                 }
-                ReceiptProjection::Forged => assert!(matches!(
+                ReceiptProjection::Foreign => assert!(matches!(
                     refused,
                     harness::engine::EngineError::Store(harness::store::StoreError::Context(
                         harness::context::ContextError::Replay(
@@ -1867,7 +1876,30 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
                 serde_json::from_str::<Value>(&attempts[0].payload).unwrap()["outcome"],
                 "failed"
             );
-            assert_eq!(provider.calls.lock().unwrap().len(), 1);
+            assert_eq!(
+                provider.calls.lock().unwrap().len(),
+                if mode == ReceiptProjection::Missing {
+                    1
+                } else {
+                    2
+                }
+            );
+        }
+        if mode == ReceiptProjection::Foreign {
+            let calls = provider.calls.lock().unwrap();
+            assert_ne!(calls[0], calls[1]);
+            let first = store
+                .replay_tool_output_operation(&calls[0])
+                .unwrap()
+                .unwrap();
+            let second = store
+                .replay_tool_output_operation(&calls[1])
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                first.item.0["output"], second.item.0["output"],
+                "equal payloads do not authorize another operation's annotation"
+            );
         }
         let operation = provider.calls.lock().unwrap()[0].clone();
         let canonical = store.replay_output_operation(&operation).unwrap().unwrap();
