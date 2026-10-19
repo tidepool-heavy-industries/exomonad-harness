@@ -16,7 +16,7 @@ use harness::{
         AdmissionGuard, Conversation, EmbeddedError, EmbeddedToolManifest, HostActor, HostControl,
         HostControlError, HostIdentity, ToolSurface,
     },
-    engine::{EmbeddedRoundReadiness, Engine, EngineConfig, RoundCleanup, RoundExecution},
+    engine::{EmbeddedRoundReadiness, EngineConfig, RoundCleanup, RoundExecution},
     item::{Item, ToolInput},
     model::{AgentPath, CallId, Effort, OperationId, RequestId},
     provider::{
@@ -1405,26 +1405,50 @@ async fn http_repeated_plain_text_compaction_preserves_native_developer_and_syst
         store: store.clone(),
         calls: Mutex::new(vec![]),
     });
+    let manifest = EmbeddedToolManifest::with_scheduling(
+        provider.tools(),
+        HashMap::from([("step".into(), ToolScheduling::BeforeNextInference)]),
+    )
+    .unwrap();
+    let application = Arc::new(Application {
+        committed: None,
+        identity: HostIdentity {
+            run: "compaction-roles".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "compaction-application".into(),
+        },
+        surface: Arc::new(
+            ToolSurface::from_manifest(
+                "compaction-v1".into(),
+                Arc::new(manifest),
+                provider.clone(),
+            )
+            .unwrap(),
+        ),
+    });
+    let conversation = Conversation::attach(store.clone(), application, None)
+        .await
+        .unwrap();
     let system = json!({"type":"message", "role":"system", "content":"Explicit system policy"});
     let developer =
         json!({"type":"message", "role":"developer", "content":"Editable developer context"});
     let human_marker = "[plain-text-compaction-v1] genuine user message";
     let recent_user = "Continue the two-step task";
-    let engine = Engine::<DeepSeekAuth, _, _>::with_transport(
-        ResponsesClient::new(auth),
-        store.clone(),
-        Arc::new(JobScheduler::new(1).unwrap()),
-        provider.clone(),
-        EngineConfig {
-            instructions: "Explicit configuration instructions".into(),
-            tools: vec![],
-            model: "deepseek-flash".into(),
-            effort: Effort::High,
-            session_id: "compaction-roles".into(),
-            agent: AgentPath("/root".into()),
-        },
-    )
-    .with_plain_text_compaction(NonZeroU64::new(500_000).unwrap());
+    let engine = conversation
+        .engine::<DeepSeekAuth, _>(
+            ResponsesClient::new(auth),
+            Arc::new(JobScheduler::new(1).unwrap()),
+            EngineConfig {
+                instructions: "Explicit configuration instructions".into(),
+                tools: vec![],
+                model: "deepseek-flash".into(),
+                effort: Effort::High,
+                session_id: "compaction-roles".into(),
+                agent: AgentPath("/root".into()),
+            },
+            NonZeroU64::new(500_000).unwrap(),
+        )
+        .unwrap();
     let initial = vec![
         Item(system.clone()),
         Item(developer.clone()),
