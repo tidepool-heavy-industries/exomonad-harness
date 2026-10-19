@@ -16,7 +16,7 @@ use harness::{
         AdmissionGuard, Conversation, EmbeddedError, EmbeddedToolManifest, HostActor, HostControl,
         HostControlError, HostIdentity, ToolSurface,
     },
-    engine::{EmbeddedRoundReadiness, EngineConfig, RoundCleanup, RoundExecution},
+    engine::{EmbeddedRoundReadiness, Engine, EngineConfig, RoundCleanup, RoundExecution},
     item::{Item, ToolInput},
     model::{AgentPath, CallId, Effort, OperationId, RequestId},
     provider::{
@@ -270,15 +270,21 @@ fn assistant() -> Value {
         "content":[{"type":"output_text","text":"round done","annotations":[]}]})
 }
 fn completed(id: &str, output: &[Value]) -> HttpReply {
+    completed_with_usage(id, output, None)
+}
+fn completed_with_usage(id: &str, output: &[Value], input_tokens: Option<u64>) -> HttpReply {
     let mut events =
         vec![json!({"type":"response.created","response":{"id":id,"status":"in_progress"}})];
     for (index, item) in output.iter().enumerate() {
         events.push(json!({"type":"response.output_item.done","output_index":index,"item":item}));
     }
-    events.push(
-        json!({"type":"response.completed","response":{"id":id,"status":"completed",
-        "model":"deepseek-flash","output":output}}),
-    );
+    let mut response =
+        json!({"id":id,"status":"completed", "model":"deepseek-flash","output":output});
+    if let Some(input_tokens) = input_tokens {
+        response["usage"] =
+            json!({"input_tokens":input_tokens,"output_tokens":1,"total_tokens":input_tokens+1});
+    }
+    events.push(json!({"type":"response.completed","response":response}));
     HttpReply::fragmented_sse(semantic_events(&events), &[1, 3, 2, 7])
 }
 
@@ -1325,4 +1331,236 @@ async fn http_sync_group_delivers_fifo_inputs_after_all_outputs_and_preserves_ca
         drop(calls);
         server.finish().await;
     }
+}
+
+struct CompactionSteps {
+    store: Arc<Store>,
+    calls: Mutex<Vec<OperationId>>,
+}
+
+#[async_trait]
+impl Provider for CompactionSteps {
+    fn tools(&self) -> Vec<Value> {
+        vec![json!({"type":"function", "name":"step", "strict":true,
+            "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}})]
+    }
+    fn tool_scheduling(&self, _: &str) -> ToolScheduling {
+        ToolScheduling::BeforeNextInference
+    }
+    async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+        panic!("step requires its actual invocation and context cut")
+    }
+    async fn complete_call(
+        &self,
+        name: &str,
+        input: ToolInput,
+        context: CallContext,
+    ) -> ProviderCompletion {
+        assert_eq!(name, "step");
+        assert_eq!(input, ToolInput::Function(json!({})));
+        let snapshot = context
+            .context
+            .expect("serial tool receives real Store context");
+        assert_eq!(context.operation.as_ref(), Some(&snapshot.operation));
+        let inspection = self.store.inspect_context(&snapshot).unwrap();
+        let expected_summaries = usize::from(self.calls.lock().unwrap().len() == 1);
+        let summary_fields = inspection.document.blocks.iter().flat_map(|block| match block {
+            ContextBlock::Native { texts, .. } => texts.as_slice(), _ => &[],
+        }).filter(|field| field.text == "[plain-text-compaction-v1] Earlier conversation summary:\nFirst model-generated handoff")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summary_fields.len(),
+            expected_summaries,
+            "the second actual step must observe the first generated handoff"
+        );
+        for field in summary_fields {
+            let authorship = inspection
+                .authorship
+                .iter()
+                .find(|author| {
+                    author.reference == field.reference && author.selector == field.selector
+                })
+                .unwrap();
+            assert!(
+                !authorship.authored_note,
+                "a generated summary must not gain authored-note provenance"
+            );
+        }
+        let mut calls = self.calls.lock().unwrap();
+        calls.push(snapshot.operation);
+        // The second source really grows enough to cross the compactor's
+        // repeated-attempt growth gate; token counts alone cannot force it.
+        let repeat = if calls.len() == 1 { 1_000 } else { 12_000 };
+        ProviderCompletion::unedited(Ok(Value::String("step evidence ".repeat(repeat))))
+    }
+}
+
+#[tokio::test]
+async fn http_repeated_plain_text_compaction_preserves_native_developer_and_system_roles() {
+    let mut server = LocalResponses::start().await;
+    let files = Files::new();
+    let auth = files.auth(&server.endpoint);
+    let store = Arc::new(Store::open(files.0.join("compaction.sqlite")).unwrap());
+    let provider = Arc::new(CompactionSteps {
+        store: store.clone(),
+        calls: Mutex::new(vec![]),
+    });
+    let system = json!({"type":"message", "role":"system", "content":"Explicit system policy"});
+    let developer =
+        json!({"type":"message", "role":"developer", "content":"Editable developer context"});
+    let human_marker = "[plain-text-compaction-v1] genuine user message";
+    let recent_user = "Continue the two-step task";
+    let engine = Engine::with_transport(
+        ResponsesClient::new(auth),
+        store.clone(),
+        Arc::new(JobScheduler::new(1).unwrap()),
+        provider.clone(),
+        EngineConfig {
+            instructions: "Explicit configuration instructions".into(),
+            tools: vec![],
+            model: "deepseek-flash".into(),
+            effort: Effort::High,
+            session_id: "compaction-roles".into(),
+            agent: AgentPath("/root".into()),
+        },
+    )
+    .with_plain_text_compaction(NonZeroU64::new(500_000).unwrap());
+    let initial = vec![
+        Item(system.clone()),
+        Item(developer.clone()),
+        Item::user_text("Historical work and evidence. ".repeat(2_000)),
+        Item::user_text(human_marker),
+        Item::user_text(recent_user),
+    ];
+    let (_cancel, cancellation) = watch::channel(false);
+    let (_mail, incoming) = mpsc::unbounded_channel();
+    let running = engine.run(None, initial, cancellation, incoming);
+    tokio::pin!(running);
+    let first = tokio::select! {
+        result = &mut running => panic!("initial DeepSeek request missing: {result:?}"),
+        request = server.next() => request,
+    };
+    assert_eq!(first.captured.json()["input"][0], system);
+    assert_eq!(first.captured.json()["input"][1], developer);
+    let step = |id: &str| {
+        json!({"type":"function_call", "id":format!("item-{id}"),
+        "call_id":id,"name":"step","arguments":"{}"})
+    };
+    first.respond(completed_with_usage(
+        "first-step",
+        &[step("step01")],
+        Some(600_000),
+    ));
+    let summaries = [
+        "First model-generated handoff",
+        "Second model-generated handoff",
+    ];
+    for (index, summary_text) in summaries.into_iter().enumerate() {
+        let summary_request = tokio::select! {
+            result = &mut running => panic!("summary request {index} missing: {result:?}"),
+            request = server.next() => request,
+        };
+        let summary_body = summary_request.captured.json();
+        assert!(
+            summary_body
+                .get("tool_choice")
+                .is_none_or(|choice| choice == "none")
+        );
+        assert!(
+            summary_body
+                .get("tools")
+                .is_none_or(|tools| tools.as_array().unwrap().is_empty())
+        );
+        assert_eq!(
+            summary_body["instructions"],
+            "Explicit configuration instructions"
+        );
+        summary_request.respond(completed(&format!("summary-{index}"), &[
+            json!({"type":"message", "id":format!("summary-item-{index}"), "role":"assistant", "status":"completed",
+                "content":[{"type":"output_text", "text":summary_text,"annotations":[]}]}),
+        ]));
+        let continued = tokio::select! {
+            result = &mut running => panic!("post-compaction HTTP request {index} missing: {result:?}"),
+            request = server.next() => request,
+        };
+        let body = continued.captured.json();
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(body["instructions"], "Explicit configuration instructions");
+        assert_eq!(input.iter().filter(|item| **item == system).count(), 1);
+        assert_eq!(input.iter().filter(|item| **item == developer).count(), 1);
+        let expected = json!({"type":"message", "role":"developer", "content":
+            format!("[plain-text-compaction-v1] Earlier conversation summary:\n{summary_text}")});
+        assert_eq!(
+            input.iter().filter(|item| **item == expected).count(),
+            1,
+            "generated developer context must reach actual HTTP without rejection or system promotion"
+        );
+        let summary_messages = input
+            .iter()
+            .filter(|item| {
+                item["role"] == "developer"
+                    && item["content"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("[plain-text-compaction-v1]"))
+            })
+            .count();
+        assert_eq!(
+            summary_messages, 1,
+            "recompaction replaces the prior summary"
+        );
+        for text in [human_marker, recent_user] {
+            assert_eq!(
+                input
+                    .iter()
+                    .filter(|item| item["role"] == "user" && item["content"].as_str() == Some(text))
+                    .count(),
+                1,
+                "real user context survives even when its text resembles the summary marker"
+            );
+        }
+        if index == 0 {
+            continued.respond(completed_with_usage(
+                "second-step",
+                &[step("step02")],
+                Some(600_000),
+            ));
+        } else {
+            continued.respond(completed("compaction-final", &[assistant()]));
+        }
+    }
+    let completion = tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+    let attempts = store
+        .events(None)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "compaction_attempt")
+        .map(|event| serde_json::from_str::<Value>(&event.payload).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 2);
+    assert!(
+        attempts
+            .iter()
+            .all(|attempt| attempt["outcome"] == "applied")
+    );
+    let calls = provider.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|operation| operation.call.0.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["step01", "step02"])
+    );
+    assert!(
+        store
+            .items(&completion.head_request)
+            .unwrap()
+            .iter()
+            .any(|item| item.0 == assistant())
+    );
+    drop(calls);
+    server.finish().await;
 }

@@ -72,7 +72,7 @@ impl Auth for CountingAuth {
 }
 
 #[test]
-fn deepseek_preparation_retains_contract_and_projects_only_authored_policy() {
+fn deepseek_preparation_retains_contract_and_native_developer_role() {
     let store = Store::memory().unwrap();
     let head = RequestId("deepseek-prepared".into());
     store.create_request(&head, None, "/root").unwrap();
@@ -85,7 +85,7 @@ fn deepseek_preparation_retains_contract_and_projects_only_authored_policy() {
     let selected = admission("/offline/selected-key");
     let prepared = prepare(&store, &head, dto, selected.clone());
     let body: Value = serde_json::from_slice(prepared.wire_body()).unwrap();
-    assert_eq!(body["input"][0]["role"], "system");
+    assert_eq!(body["input"][0], original["input"][0]);
     assert_eq!(body["input"][1]["content"], original["input"][1]["content"]);
     assert_eq!(serde_json::to_value(prepared.request()).unwrap(), original);
     assert_eq!(body["tools"][0]["type"], "function");
@@ -109,16 +109,35 @@ fn deepseek_preparation_retains_contract_and_projects_only_authored_policy() {
     )
     .unwrap();
     assert_eq!(restored.contract(), selected.contract());
-    assert!(matches!(
-        deepseek_request(
-            prepared.request(),
-            selected.contract().limits,
-            &[false, false]
-        ),
-        Err(TransportError::UnsupportedSemantics(
-            UnsupportedSemantics::Message
-        ))
-    ));
+}
+
+#[test]
+fn deepseek_preserves_native_message_roles_and_developer_images() {
+    let limits = InferenceLimits::deepseek_default();
+    let messages = ["system", "developer", "user", "assistant"]
+        .map(|role| json!({"type":"message", "role":role, "content":format!("{role} message")}));
+    let dto = ResponsesRequest {
+        input: messages.iter().cloned().map(Item).collect(),
+        ..request()
+    };
+    assert_eq!(
+        deepseek_request(&dto, limits).unwrap()["input"],
+        json!(messages)
+    );
+    for role in ["user", "developer"] {
+        let message = json!({"type":"message", "role":role, "content":[
+            {"type":"input_text", "text":"image context"},
+            {"type":"input_image", "image_url":"https://example.invalid/fixture.png"}
+        ]});
+        let dto = ResponsesRequest {
+            input: vec![Item(message.clone())],
+            ..request()
+        };
+        assert_eq!(
+            deepseek_request(&dto, limits).unwrap()["input"],
+            json!([message])
+        );
+    }
 }
 
 #[test]
@@ -131,7 +150,11 @@ fn deepseek_refuses_unsupported_semantics_and_invalid_endpoints() {
             UnsupportedSemantics::Message,
         ),
         (
-            json!({"type":"message","role":"developer","content":[{"type":"input_image","image_url":"unused"}]}),
+            json!({"type":"message","role":"system","content":[{"type":"input_image","image_url":"unused"}]}),
+            UnsupportedSemantics::Message,
+        ),
+        (
+            json!({"type":"message","role":"assistant","content":[{"type":"input_image","image_url":"unused"}]}),
             UnsupportedSemantics::Message,
         ),
         (
@@ -164,7 +187,7 @@ fn deepseek_refuses_unsupported_semantics_and_invalid_endpoints() {
             ..request()
         };
         assert!(
-            matches!(deepseek_request(&dto, limits, &[true]), Err(TransportError::UnsupportedSemantics(actual)) if actual == expected)
+            matches!(deepseek_request(&dto, limits), Err(TransportError::UnsupportedSemantics(actual)) if actual == expected)
         );
     }
     for endpoint in [
@@ -187,7 +210,7 @@ fn deepseek_refuses_unsupported_semantics_and_invalid_endpoints() {
             ..request()
         };
         assert_eq!(
-            deepseek_request(&dto, limits, &[false]).unwrap()["reasoning"]["effort"],
+            deepseek_request(&dto, limits).unwrap()["reasoning"]["effort"],
             serde_json::to_value(effort).unwrap()
         );
     }
@@ -197,8 +220,7 @@ fn deepseek_refuses_unsupported_semantics_and_invalid_endpoints() {
                 pinned_effort: Effort::Medium,
                 ..request()
             },
-            limits,
-            &[false]
+            limits
         ),
         Err(TransportError::UnsupportedSemantics(
             UnsupportedSemantics::ReasoningEffort
@@ -222,7 +244,7 @@ fn deepseek_preserves_plaintext_reasoning_optional_metadata() {
             input: vec![Item(original.clone())],
             ..request()
         };
-        let body = deepseek_request(&dto, InferenceLimits::deepseek_default(), &[false]).unwrap();
+        let body = deepseek_request(&dto, InferenceLimits::deepseek_default()).unwrap();
         assert_eq!(body["input"], json!([original]));
         assert_eq!(dto.input[0].0, original);
     }
@@ -235,7 +257,7 @@ fn deepseek_preserves_plaintext_reasoning_optional_metadata() {
             ..request()
         };
         assert_eq!(
-            deepseek_request(&dto, InferenceLimits::deepseek_default(), &[false]).unwrap()["input"],
+            deepseek_request(&dto, InferenceLimits::deepseek_default()).unwrap()["input"],
             json!([original])
         );
     }
@@ -367,8 +389,7 @@ fn deepseek_http_builder_uses_plain_json_without_openai_headers() {
     let selected = admission("/offline/key");
     let dto = request();
     let bytes =
-        serde_json::to_vec(&deepseek_request(&dto, selected.contract().limits, &[false]).unwrap())
-            .unwrap();
+        serde_json::to_vec(&deepseek_request(&dto, selected.contract().limits).unwrap()).unwrap();
     let wire = native_http_request(
         &reqwest::Client::new(),
         &dto,

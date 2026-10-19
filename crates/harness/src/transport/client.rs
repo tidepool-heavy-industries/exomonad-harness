@@ -41,7 +41,6 @@ pub(crate) fn normalize_for_dispatch(
         ResponsesRoute::DeepSeek => serde_json::to_vec(&deepseek_request(
             request,
             super::InferenceLimits::deepseek_default(),
-            &vec![false; request.input.len()],
         )?),
     }
     .map_err(|_| TransportError::Stream("request serialization failed".into()))?;
@@ -68,7 +67,7 @@ pub(crate) fn normalize_for_selection(
             return normalize_for_dispatch(request, selection.response_contract());
         }
         let mut body = match contract.route {
-            ResponsesRoute::DeepSeek => deepseek_request(request, contract.limits, authored)?,
+            ResponsesRoute::DeepSeek => deepseek_request(request, contract.limits)?,
             ResponsesRoute::GeminiInteractions => {
                 super::interactions::request(request, contract.limits, authored)?
             }
@@ -99,7 +98,6 @@ pub(crate) fn normalize_for_selection(
         return serde_json::to_vec(&deepseek_request(
             request,
             super::InferenceLimits::deepseek_default(),
-            authored,
         )?)
         .map(NormalizedProviderBody)
         .map_err(|_| TransportError::InvalidAdmission);
@@ -267,14 +265,10 @@ fn normalized_request(request: &ResponsesRequest) -> Result<RequestBody<'_>, Tra
 fn deepseek_request(
     request: &ResponsesRequest,
     limits: super::InferenceLimits,
-    authored: &[bool],
 ) -> Result<Value, TransportError> {
     use super::UnsupportedSemantics as Unsupported;
     let refuse = |kind| TransportError::UnsupportedSemantics(kind);
-    if request.model.is_empty()
-        || !request.session_id.valid()
-        || authored.len() != request.input.len()
-    {
+    if request.model.is_empty() || !request.session_id.valid() {
         return Err(TransportError::InvalidAdmission);
     }
     if crate::item::Item::effective_effort(&request.input, request.pinned_effort)
@@ -323,7 +317,7 @@ fn deepseek_request(
         }
     }
     let mut input = Vec::new();
-    for (original, authored) in request.input.iter().zip(authored) {
+    for original in &request.input {
         if original.is_configuration_update() {
             continue;
         }
@@ -341,20 +335,15 @@ fn deepseek_request(
                         parts.iter().all(|part| {
                             (matches!(part["type"].as_str(), Some("input_text" | "output_text"))
                                 && part["text"].is_string())
-                                || (role == "user" && part["type"] == "input_image")
+                                || (matches!(role, "user" | "developer")
+                                    && part["type"] == "input_image")
                         })
                     });
                 if !valid_content {
                     return Err(refuse(Unsupported::Message));
                 }
-                // DeepSeek treats developer as user. Keep authored policy at its
-                // original position by explicitly selecting the supported system role.
-                if role == "developer" {
-                    if !authored {
-                        return Err(refuse(Unsupported::Message));
-                    }
-                    item["role"] = Value::String("system".into());
-                }
+                // DeepSeek accepts developer directly and treats it as user.
+                // Preserve the issuing role; only explicit system stays system.
             }
             Some("function_call" | "function_call_output") => {
                 if item.get("namespace").is_some() || item.get("async").is_some() {
