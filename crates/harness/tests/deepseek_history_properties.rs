@@ -1889,17 +1889,36 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
                         harness::engine::EngineError::ProviderCall(_)
                     ));
                 }
-                ReceiptProjection::Foreign => assert!(
-                    matches!(
-                        &refused,
-                        harness::engine::EngineError::Store(harness::store::StoreError::Context(
-                            harness::context::ContextError::Replay(
-                                harness::context::ContextReplayRejection::InvalidMembership
+                ReceiptProjection::Foreign => {
+                    let harness::engine::EngineError::BlockedAction(blocked) = &refused else {
+                        panic!("foreign annotation must durably block continuity: {refused:?}");
+                    };
+                    assert!(
+                        matches!(
+                            blocked.primary(),
+                            harness::engine::EngineError::Store(
+                                harness::store::StoreError::Context(
+                                    harness::context::ContextError::Replay(
+                                        harness::context::ContextReplayRejection::InvalidMembership
+                                    )
+                                )
                             )
-                        ))
-                    ),
-                    "{refused:?}"
-                ),
+                        ),
+                        "{refused:?}"
+                    );
+                    assert_eq!(
+                        blocked.block().reason,
+                        harness::embedding::InferenceBlockReason::ContinuityUnproven
+                    );
+                    assert_eq!(
+                        store
+                            .embedded_inference_state(conversation.identity())
+                            .unwrap(),
+                        harness::embedding::HostInferenceState::Blocked {
+                            block: blocked.block().clone()
+                        }
+                    );
+                }
                 ReceiptProjection::Valid => unreachable!(),
             }
             let attempts = store
