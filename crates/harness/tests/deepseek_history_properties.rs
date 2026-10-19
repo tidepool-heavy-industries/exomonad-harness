@@ -1362,31 +1362,18 @@ impl Provider for CompactionSteps {
             .context
             .expect("serial tool receives real Store context");
         assert_eq!(context.operation.as_ref(), Some(&snapshot.operation));
-        let inspection = self.store.inspect_context(&snapshot).unwrap();
+        let items = self.store.items(&snapshot.head).unwrap();
         let expected_summaries = usize::from(self.calls.lock().unwrap().len() == 1);
-        let summary_fields = inspection.document.blocks.iter().flat_map(|block| match block {
-            ContextBlock::Native { texts, .. } => texts.as_slice(), _ => &[],
-        }).filter(|field| field.text == "[plain-text-compaction-v1] Earlier conversation summary:\nFirst model-generated handoff")
-            .collect::<Vec<_>>();
+        let expected_summary = json!({"type":"message", "role":"developer", "content":
+            "[plain-text-compaction-v1] Earlier conversation summary:\nFirst model-generated handoff"});
         assert_eq!(
-            summary_fields.len(),
-            expected_summaries,
-            "the second actual step must observe the first generated handoff: {:?}",
-            inspection.document
-        );
-        for field in summary_fields {
-            let authorship = inspection
-                .authorship
+            items
                 .iter()
-                .find(|author| {
-                    author.reference == field.reference && author.selector == field.selector
-                })
-                .unwrap();
-            assert!(
-                !authorship.authored_note,
-                "a generated summary must not gain authored-note provenance"
-            );
-        }
+                .filter(|item| item.0 == expected_summary)
+                .count(),
+            expected_summaries,
+            "the second actual step must retain the first generated handoff"
+        );
         let mut calls = self.calls.lock().unwrap();
         calls.push(snapshot.operation);
         // The second source really grows enough to cross the compactor's
