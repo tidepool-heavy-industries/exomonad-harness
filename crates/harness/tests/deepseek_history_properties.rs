@@ -1371,7 +1371,8 @@ impl Provider for CompactionSteps {
         assert_eq!(
             summary_fields.len(),
             expected_summaries,
-            "the second actual step must observe the first generated handoff"
+            "the second actual step must observe the first generated handoff: {:?}",
+            inspection.document
         );
         for field in summary_fields {
             let authorship = inspection
