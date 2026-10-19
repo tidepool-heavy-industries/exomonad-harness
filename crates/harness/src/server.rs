@@ -1938,6 +1938,7 @@ mod tests {
 
     fn projected_actor(run: &str, actor: &str, incarnation: &str) -> HostActorProjection {
         HostActorProjection {
+            terminal: None,
             workbench: None,
             form_waits: None,
             output_origin: None,

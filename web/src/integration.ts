@@ -97,7 +97,7 @@ export function createViewProjector(): (state: NormalizedState) => HarnessViewMo
           outputOrigin: actor.outputOrigin ?? undefined,
           parentIdentity: actor.parent,
           parent: actor.parent ? `${actor.parent.actor} · incarnation ${actor.parent.incarnation} · run ${actor.parent.run}` : undefined,
-          kind: actor.kind, lifecycle: actor.lifecycle,
+          kind: actor.kind, lifecycle: actor.lifecycle, terminal: actor.terminal ?? undefined,
           modelConversation: actor.modelConversation ?? undefined,
           modelHeadRequest: actor.modelHeadRequest ?? undefined, activeRound: actor.activeRound ?? undefined, inference: actor.inference ?? undefined,
         }))

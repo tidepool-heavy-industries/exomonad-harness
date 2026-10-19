@@ -7,6 +7,14 @@ import { customJobJourney, customSuccessJourney } from './tests/fixture'
 import App from './App'
 
 describe('web outcome integration', () => {
+  it('carries the original terminal summary into the worker presentation', () => {
+    const terminal = { kind: 'failed' as const, summary: 'original host failure: native group unavailable' }
+    const snapshot: Snapshot = { seq: '1', actors: [{ identity: { run: 'run', actor: '/root', incarnation: 'failed' },
+      parent: null, kind: 'model', lifecycle: 'lost', modelConversation: null, terminal }],
+      conversations: [], requests: [], jobs: [], envelopes: [] }
+    expect(toViewModel(normalizeSnapshot(snapshot)).actors?.[0]?.terminal).toEqual(terminal)
+  })
+
   it('projects an exact retired actor head without any activity rows', () => {
     const snapshot: Snapshot = { seq: '1', hostRun: 'run', actors: [{
       identity: { run: 'run', actor: '/root/old', incarnation: '1' }, parent: null,

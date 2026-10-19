@@ -13,6 +13,7 @@ export type EntityId = string;
 export type Snapshot = Extract<ServerFrame, { type: 'snapshot' }>['snapshot'];
 export type SequencedEvent = Extract<ServerFrame, { type: 'event' }>['event'];
 export type StateEvent = SequencedEvent['event'];
+export type HostActorTerminal = NonNullable<HostActorProjection['terminal']>;
 export type HostActorProjection = NonNullable<Snapshot['actors']>[number];
 export type HostInferenceState = NonNullable<HostActorProjection['inference']>;
 export type InferenceBlock = Extract<HostCommand, { action: 'recover' }>['expected_block'];

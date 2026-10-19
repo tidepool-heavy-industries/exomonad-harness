@@ -132,8 +132,9 @@ pub enum CommandReceiptOutcome {
 }
 
 pub use contract::{
-    ClientFrame as WsClientFrame, HostActorProjection, SequencedEvent as WsEvent,
-    ServerFrame as WsServerFrame, Snapshot, StateEvent as WsEventPayload,
+    ClientFrame as WsClientFrame, HostActorExitKind, HostActorProjection, HostActorTerminal,
+    SequencedEvent as WsEvent, ServerFrame as WsServerFrame, Snapshot,
+    StateEvent as WsEventPayload,
 };
 
 impl From<&ToolJobRecord> for contract::JobProjection {
@@ -268,6 +269,7 @@ mod tests {
     #[test]
     fn model_actor_projection_roundtrips_optional_exact_head() {
         let mut actor = HostActorProjection {
+            terminal: None,
             workbench: None,
             form_waits: None,
             output_origin: None,
@@ -286,10 +288,34 @@ mod tests {
         };
         let old_wire = serde_json::to_value(&actor).unwrap();
         assert!(old_wire.get("modelHeadRequest").is_none());
+        assert!(old_wire.get("terminal").is_none());
         assert_eq!(
             serde_json::from_value::<HostActorProjection>(old_wire).unwrap(),
             actor
         );
+        for kind in [
+            HostActorExitKind::Completed,
+            HostActorExitKind::Failed,
+            HostActorExitKind::Cancelled,
+            HostActorExitKind::Interrupted,
+        ] {
+            actor.terminal = Some(HostActorTerminal {
+                kind,
+                summary: "original host failure: native group unavailable".into(),
+            });
+            let wire = serde_json::to_value(&actor).unwrap();
+            assert_eq!(
+                wire["terminal"]["summary"],
+                "original host failure: native group unavailable"
+            );
+            assert_eq!(
+                serde_json::from_value::<HostActorProjection>(wire).unwrap(),
+                actor
+            );
+        }
+        let mut invalid = serde_json::to_value(&actor).unwrap();
+        invalid["terminal"]["kind"] = json!("unknown");
+        assert!(serde_json::from_value::<HostActorProjection>(invalid).is_err());
         actor.model_head_request = Some("retained-head".into());
         let wire = serde_json::to_value(&actor).unwrap();
         assert_eq!(wire["modelHeadRequest"], "retained-head");
@@ -307,6 +333,7 @@ mod tests {
             incarnation: "first".into(),
         };
         let child = HostActorProjection {
+            terminal: None,
             workbench: None,
             form_waits: None,
             output_origin: None,

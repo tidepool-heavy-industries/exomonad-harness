@@ -123,6 +123,7 @@ export default function WorkerChat({ data, route, navigate, transportPhase, issu
       <ul>{shown.rows.map(actor => <li key={actorIdentityKey(identityOf(actor))}>
         {workerLink(identityOf(actor), actor.name)}
         <span className="meta">{actor.kind} · {actor.lifecycle}</span>
+        {actor.lifecycle === 'lost' && actor.terminal && <p>{actor.terminal.summary}</p>}
       </li>)}</ul>
       {!shown.total && <p>No workers match.</p>}
       {shown.pageCount > 1 && <div className="history-controls">

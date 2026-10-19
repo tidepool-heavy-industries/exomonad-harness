@@ -27,6 +27,14 @@ beforeEach(() => {
   vi.mocked(readHistoryPage).mockImplementation(async id => history(id))
 })
 describe('exact worker Chat', () => {
+  it('shows the authoritative terminal summary in a lost worker row', () => {
+    const summary = 'original host failure: native group unavailable'
+    render(chat({ ...data, actors: [{ ...actor, lifecycle: 'lost', terminal: { kind: 'failed', summary } }] }))
+    const workers = screen.getByRole('complementary', { name: 'Workers' })
+    expect(within(workers).getByText(summary)).toBeVisible()
+    expect(within(workers).getByText('model · lost')).toBeVisible()
+  })
+
   it.each(['retired', 'lost'])('loads durable history for an initially %s worker and after reload', async lifecycle => {
     const retired = { ...data, actors: [{ ...actor, lifecycle }] }
     const first = render(chat(retired))

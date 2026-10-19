@@ -5,6 +5,23 @@ import { describe, expect, it } from 'vitest'
 const nextCounter = (value: string) => (BigInt(value) + 1n).toString()
 
 describe('generated browser state projection', () => {
+  it('retains typed actor terminals through snapshot and event validation', () => {
+    const identity = { run: 'run', actor: '/root', incarnation: 'failed' }
+    for (const kind of ['completed', 'failed', 'cancelled', 'interrupted'] as const) {
+      const terminal = { kind, summary: 'original host failure: native group unavailable' }
+      const actor = { identity, parent: null, kind: 'model' as const, lifecycle: 'lost' as const, modelConversation: null, terminal }
+      const snapshot: Snapshot = { ...fixtureSnapshot, actors: [actor] }
+      expect(isSnapshot(snapshot)).toBe(true)
+      const event = { seq: nextCounter(snapshot.seq), event: { kind: 'actor.upsert' as const, value: actor } }
+      expect(isSequencedEvent(event)).toBe(true)
+      const applied = applyStateEvent(normalizeSnapshot(snapshot), event)
+      if (applied.kind !== 'applied') throw new Error('valid terminal event failed')
+      expect(applied.state.actors.get(actorIdentityKey(identity))?.terminal).toEqual(terminal)
+      expect(isSnapshot({ ...snapshot, actors: [{ ...actor, terminal: { ...terminal, kind: 'unknown' } }] })).toBe(false)
+      expect(isSnapshot({ ...snapshot, actors: [{ ...actor, terminal: { kind } }] })).toBe(false)
+    }
+  })
+
   it('applies exact consecutive counters above JavaScript safe integers without mutating prior state', () => {
     const snapshot: Snapshot = { ...fixtureSnapshot, seq: '9007199254740992' }
     expect(isSnapshot(snapshot)).toBe(true)

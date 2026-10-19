@@ -225,6 +225,7 @@ mod tests {
         control.update_host_projection(
             "run".into(),
             vec![HostActorProjection {
+                terminal: None,
                 workbench: None,
                 form_waits: None,
                 output_origin: None,

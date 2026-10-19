@@ -131,8 +131,10 @@ struct Offline;
 impl Auth for Offline {
     fn admission(
         &self,
-    ) -> std::result::Result<harness::transport::NativeTransportAdmission, harness::transport::TransportError>
-    {
+    ) -> std::result::Result<
+        harness::transport::NativeTransportAdmission,
+        harness::transport::TransportError,
+    > {
         harness::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
             "/offline/synthetic-credential",
         ))
@@ -1017,6 +1019,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
     control.set_snapshot(Snapshot {
         actors: vec![
             HostActorProjection {
+                terminal: None,
                 workbench: None,
                 form_waits: None,
                 output_origin: None,
@@ -1030,6 +1033,7 @@ async fn embedded_browser_login_input_history_and_reconnect_use_external_owner()
                 inference: None,
             },
             HostActorProjection {
+                terminal: None,
                 workbench: None,
                 form_waits: None,
                 output_origin: None,

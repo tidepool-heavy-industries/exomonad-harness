@@ -19,6 +19,7 @@ export type HarnessViewModel = {
     parentIdentity?: HostActorIdentity | null;
     kind: "model" | "workflow";
     lifecycle: string;
+    terminal?: import('./protocol').HostActorTerminal;
     modelConversation?: string;
     modelHeadRequest?: string;
     activeRound?: string;

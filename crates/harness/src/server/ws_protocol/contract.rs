@@ -247,6 +247,23 @@ impl From<&crate::store::history::HistoryPage> for HistoryPage {
     }
 }
 
+/// Authoritative terminal outcome retained by the host for this exact actor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostActorTerminal {
+    pub kind: HostActorExitKind,
+    pub summary: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HostActorExitKind {
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostActorProjection {
@@ -256,6 +273,8 @@ pub struct HostActorProjection {
     pub parent: Option<HostActorIdentity>,
     pub kind: HostActorKind,
     pub lifecycle: HostActorLifecycle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<HostActorTerminal>,
     pub model_conversation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_head_request: Option<String>,
@@ -755,6 +774,7 @@ pub fn wire_samples() -> serde_json::Value {
         incarnation: "incarnation".into(),
     };
     let actor = HostActorProjection {
+        terminal: None,
         workbench: Some(HostWorkbenchObservation::AwaitingEffect {
             input_unit_index: 9_007_199_254_740_993u64.into(),
             total: u64::MAX.into(),
