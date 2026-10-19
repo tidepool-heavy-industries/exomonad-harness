@@ -1680,6 +1680,36 @@ impl Provider for ReceiptTools {
     }
 }
 
+struct ReceiptApplication {
+    application: Application,
+    provider: Arc<ReceiptTools>,
+}
+
+#[async_trait]
+impl HostActor for ReceiptApplication {
+    fn identity(&self) -> &HostIdentity {
+        self.application.identity()
+    }
+    async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+        self.application.admit().await
+    }
+    async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+        self.application.tool_surface().await
+    }
+    async fn wake(&self, id: i64) -> Result<(), String> {
+        self.application.wake(id).await
+    }
+    async fn control(&self, control: HostControl) -> Result<Value, HostControlError> {
+        self.application.control(control).await
+    }
+    async fn output_retained(&self, operation: &OperationId) -> Result<(), String> {
+        self.provider
+            .output_retained(operation)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[tokio::test]
 async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_invalid_evidence() {
     for mode in [
@@ -1704,7 +1734,7 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
             ]),
         )
         .unwrap();
-        let application = Arc::new(Application {
+        let application = Application {
             committed: None,
             identity: HostIdentity {
                 run: "receipt-compaction".into(),
@@ -1719,6 +1749,10 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
                 )
                 .unwrap(),
             ),
+        };
+        let application = Arc::new(ReceiptApplication {
+            application,
+            provider: provider.clone(),
         });
         let conversation = Conversation::attach(store.clone(), application, None)
             .await
