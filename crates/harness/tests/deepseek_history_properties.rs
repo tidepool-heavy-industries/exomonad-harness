@@ -1922,6 +1922,10 @@ async fn http_text_compaction_uses_qualified_receipt_annotations_and_refuses_inv
         if mode == ReceiptProjection::Foreign {
             let calls = provider.calls.lock().unwrap();
             assert_ne!(calls[0], calls[1]);
+            assert!(
+                store.model_output_projection(&calls[1]).unwrap().is_some(),
+                "the second operation has its own genuinely issued valid annotation"
+            );
             let first = store
                 .replay_tool_output_operation(&calls[0])
                 .unwrap()
