@@ -760,3 +760,61 @@ fn known_model_output_refuses_unsupported_or_malformed_content_without_text_succ
     assert_eq!(done.item().0["gemini_step"], native);
     assert!(done.item().tool_call().unwrap().is_none());
 }
+
+#[test]
+fn malformed_arguments_keep_identity_without_string_double_decode() {
+    use crate::item::{FunctionArgumentError, ToolInput};
+    for value in [json!("{\"x\":1}"), json!([1]), json!(null)] {
+        let mut assembly = created();
+        start(
+            &mut assembly,
+            0,
+            json!({"type":"function_call","id":"bad","name":"echo","arguments":value}),
+        );
+        stop(&mut assembly, 0);
+        terminal(&mut assembly, "requires_action");
+        let item = assembly.finish_complete().unwrap().items.remove(0);
+        assert_eq!(item.0["gemini_step"]["arguments"], value);
+        let call = item.tool_call().unwrap().unwrap();
+        assert_eq!(call.call_id.0, "bad");
+        assert!(matches!(
+            call.input,
+            ToolInput::InvalidFunction {
+                reason: FunctionArgumentError::NotObject,
+                ..
+            }
+        ));
+    }
+    for raw in ["\"{}\"", "[1]", "{"] {
+        let mut assembly = created();
+        start(
+            &mut assembly,
+            0,
+            json!({"type":"function_call","id":"bad","name":"echo"}),
+        );
+        send(&mut assembly, json!({"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":raw}})).unwrap();
+        stop(&mut assembly, 0);
+        terminal(&mut assembly, "requires_action");
+        let item = assembly.finish_complete().unwrap().items.remove(0);
+        assert!(matches!(
+            item.tool_call().unwrap().unwrap().input,
+            ToolInput::InvalidFunction { .. }
+        ));
+    }
+    let mut assembly = created();
+    start(
+        &mut assembly,
+        0,
+        json!({"type":"function_call","id":"bad","name":"echo"}),
+    );
+    stop(&mut assembly, 0);
+    terminal(&mut assembly, "requires_action");
+    let item = assembly.finish_complete().unwrap().items.remove(0);
+    assert_eq!(
+        item.tool_call().unwrap().unwrap().input,
+        ToolInput::InvalidFunction {
+            arguments: None,
+            reason: FunctionArgumentError::Missing
+        }
+    );
+}

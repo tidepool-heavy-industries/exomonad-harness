@@ -439,7 +439,7 @@ impl Provider for CallbackProvider {
         let args = match &self.encoding {
             Some(map) => match map.decode(name, ToolInput::Function(args))?.0 {
                 ToolInput::Function(args) => args,
-                ToolInput::Custom(_) => {
+                ToolInput::Custom(_) | ToolInput::InvalidFunction { .. } => {
                     return Err(ProviderError::Tool(
                         "callback requires structured arguments".into(),
                     ));

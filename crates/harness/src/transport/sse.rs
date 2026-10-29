@@ -1073,6 +1073,7 @@ mod native_replay_tests {
             match call.input {
                 ToolInput::Function(args) => assert_eq!(args, json!({"until":null})),
                 ToolInput::Custom(input) => assert_eq!(input, "raw Haskell λ"),
+                ToolInput::InvalidFunction { .. } => panic!("valid input expected"),
             }
         }
         assembly.accept(&json!({"type":"response.completed","response":{"id":"native-response","output":[],"usage":{"input_tokens":12,"output_tokens":7,"input_tokens_details":{"cached_tokens":4}}}}).to_string()).unwrap();

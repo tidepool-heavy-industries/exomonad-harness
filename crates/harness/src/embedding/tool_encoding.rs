@@ -53,6 +53,18 @@ impl EncodingMap {
                     "tool namespace is not flat: {name}"
                 )));
             }
+            if profile == ToolEncodingProfile::FunctionResults {
+                if manifest.kinds[&name] != ToolKind::Function {
+                    return Err(EmbeddedError::Surface(format!(
+                        "function-results contract requires a function tool: {name}"
+                    )));
+                }
+                tool.as_object_mut()
+                    .expect("admitted declaration")
+                    .remove("async");
+                rows.insert(name, Encoding::Identity);
+                continue;
+            }
             let delivery = manifest.scheduling.get(&name).copied().unwrap_or_default()
                 == ToolScheduling::Async;
             let encoding = if manifest.kinds[&name] == ToolKind::Custom {
@@ -113,6 +125,11 @@ impl EncodingMap {
         name: &str,
         input: ToolInput,
     ) -> Result<(ToolInput, Option<ToolExecution>), ProviderError> {
+        if self.profile == ToolEncodingProfile::FunctionResults {
+            // The actor owns argument and unknown-name refusal. This contract
+            // has no transport envelope to unwrap or validate.
+            return Ok((input, Some(ToolExecution::Synchronous)));
+        }
         let fail =
             || ProviderError::Tool(format!("invalid installed tool envelope for {name}").into());
         let row = self.rows.get(name).ok_or_else(fail)?;
@@ -161,6 +178,9 @@ impl EncodingMap {
     }
 
     pub(crate) fn execution(&self, call: &ToolCall) -> Result<ToolExecution, ProviderError> {
+        if self.profile == ToolEncodingProfile::FunctionResults {
+            return Ok(ToolExecution::Synchronous);
+        }
         self.decode(&call.name, call.input.clone())
             .map(|(_, execution)| {
                 execution.unwrap_or(if self.profile == ToolEncodingProfile::Native {
@@ -378,6 +398,33 @@ mod tests {
             map.decode("structured", ToolInput::Function(original.clone()))
                 .unwrap(),
             (ToolInput::Function(original), None)
+        );
+    }
+    #[test]
+    fn function_results_preserves_domain_arguments_and_start_scheduling() {
+        let manifest = EmbeddedToolManifest::with_scheduling(
+            vec![json!({"type":"function","name":"work","parameters":{"type":"object","properties":{"delivery":{"type":"string"}},"required":["delivery"],"additionalProperties":false}})],
+            HashMap::from([("work".into(), ToolScheduling::Async)]),
+        ).unwrap();
+        let (projected, map) =
+            EncodingMap::project(&manifest, ToolEncodingProfile::FunctionResults).unwrap();
+        assert_eq!(projected.scheduling["work"], ToolScheduling::Async);
+        assert!(projected.tools[0].get("async").is_none());
+        assert_eq!(
+            projected.tools[0]["parameters"],
+            manifest.tools[0]["parameters"]
+        );
+        let input = ToolInput::Function(json!({"delivery":"domain value"}));
+        assert_eq!(
+            map.decode("work", input.clone()).unwrap(),
+            (input, Some(ToolExecution::Synchronous))
+        );
+        assert!(
+            EncodingMap::project(
+                &custom(ToolScheduling::Async),
+                ToolEncodingProfile::FunctionResults
+            )
+            .is_err()
         );
     }
 }

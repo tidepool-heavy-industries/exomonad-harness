@@ -435,6 +435,11 @@ impl ProviderCompletion {
 /// A provider owns tool meaning; the harness owns scheduling and history.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Refuse an incompatible retained contract before recovery can reclaim
+    /// operations. Inspection and cleanup do not pass through this gate.
+    fn validate_resume(&self, _head: &crate::model::RequestId) -> Result<(), ProviderError> {
+        Ok(())
+    }
     /// Identity retained by this immutable host snapshot. Ordinary providers
     /// have no native request activation and receive no settlement authority.
     fn request_activation(&self) -> Option<RequestActivation> {
@@ -511,6 +516,11 @@ pub trait Provider: Send + Sync {
         declared: ToolScheduling,
     ) -> Result<ToolScheduling, ProviderError> {
         Ok(declared)
+    }
+
+    /// An installed host contract may specialize the transport default.
+    fn tool_encoding_profile(&self) -> Option<crate::transport::ToolEncodingProfile> {
+        None
     }
 
     /// Resolve execution from the exact issuing declaration without editing wire items.
@@ -610,6 +620,9 @@ pub trait Provider: Send + Sync {
         context: CallContext,
     ) -> ProviderCompletion {
         let result = match input {
+            crate::item::ToolInput::InvalidFunction { reason, .. } => {
+                Err(ProviderError::Tool(reason.to_string().into()))
+            }
             crate::item::ToolInput::Function(args) if is_harness_tool(name) => {
                 self.call_agent_verb(name, args, context).await
             }

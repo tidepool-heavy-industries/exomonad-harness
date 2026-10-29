@@ -19,6 +19,22 @@ pub struct ItemHash(pub String);
 pub enum ToolInput {
     Function(Value),
     Custom(String),
+    /// A call with usable identity but arguments that cannot be dispatched.
+    /// Preserve the original argument field for exact issuance and replay.
+    InvalidFunction {
+        arguments: Option<Value>,
+        reason: FunctionArgumentError,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum FunctionArgumentError {
+    #[error("missing function arguments")]
+    Missing,
+    #[error("function arguments are not valid JSON")]
+    InvalidJson,
+    #[error("function arguments must be an object")]
+    NotObject,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,7 +62,7 @@ pub enum ToolKind {
 impl ToolInput {
     pub fn kind(&self) -> ToolKind {
         match self {
-            Self::Function(_) => ToolKind::Function,
+            Self::Function(_) | Self::InvalidFunction { .. } => ToolKind::Function,
             Self::Custom(_) => ToolKind::Custom,
         }
     }
@@ -59,7 +75,8 @@ impl Item {
         Self(json!({"type":"message","role":"user","content":text.into()}))
     }
 
-    /// `None` is a non-call item; a recognized but malformed call is an error.
+    /// `None` is a non-call item. Invalid identity is an error; malformed
+    /// function arguments remain a typed call for its owning refusal path.
     pub fn tool_call(&self) -> Result<Option<ToolCall>, &'static str> {
         let Some(kind) = self.0.get("type").and_then(Value::as_str) else {
             return Ok(None);
@@ -81,10 +98,12 @@ impl Item {
         let call_id = object
             .get("call_id")
             .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
             .ok_or("missing call_id")?;
         let name = object
             .get("name")
             .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
             .ok_or("missing tool name")?;
         let input = if kind == "custom_tool_call" {
             ToolInput::Custom(
@@ -95,17 +114,26 @@ impl Item {
                     .to_owned(),
             )
         } else {
-            let arguments = object
-                .get("arguments")
-                .ok_or("missing function arguments")?;
-            let args = match arguments {
-                Value::String(text) => {
-                    serde_json::from_str(text).map_err(|_| "invalid function arguments")?
-                }
-                Value::Object(map) => Value::Object(map.clone()),
-                _ => return Err("invalid function arguments"),
+            let arguments = object.get("arguments");
+            let parsed = match arguments {
+                Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+                    .map_err(|_| FunctionArgumentError::InvalidJson),
+                Some(value) => Ok(value.clone()),
+                None => Err(FunctionArgumentError::Missing),
             };
-            ToolInput::Function(args)
+            match parsed.and_then(|value| {
+                if value.is_object() {
+                    Ok(value)
+                } else {
+                    Err(FunctionArgumentError::NotObject)
+                }
+            }) {
+                Ok(value) => ToolInput::Function(value),
+                Err(reason) => ToolInput::InvalidFunction {
+                    arguments: arguments.cloned(),
+                    reason,
+                },
+            }
         };
         Ok(Some(ToolCall {
             call_id: CallId(call_id.to_owned()),
@@ -261,17 +289,23 @@ mod tool_contract_tests {
                 .tool_call(),
             Err("invalid custom input")
         );
-        for (item, refusal) in [
-            (
-                json!({"type":"custom_tool_call","call_id":"bad","name":"cell","arguments":{}}),
-                "invalid custom input",
-            ),
-            (
-                json!({"type":"function_call","call_id":"bad","name":"lookup","input":"wrong field"}),
-                "missing function arguments",
-            ),
+        assert_eq!(
+            Item(json!({"type":"custom_tool_call","call_id":"bad","name":"cell","arguments":{}}))
+                .tool_call(),
+            Err("invalid custom input"),
+        );
+        for (arguments, reason) in [
+            (None, FunctionArgumentError::Missing),
+            (Some(json!("{")), FunctionArgumentError::InvalidJson),
+            (Some(json!([1])), FunctionArgumentError::NotObject),
         ] {
-            assert_eq!(Item(item).tool_call(), Err(refusal));
+            let mut item = json!({"type":"function_call","call_id":"bad","name":"lookup"});
+            if let Some(value) = &arguments {
+                item["arguments"] = value.clone();
+            }
+            let call = Item(item).tool_call().unwrap().unwrap();
+            assert_eq!(call.call_id.0, "bad");
+            assert_eq!(call.input, ToolInput::InvalidFunction { arguments, reason });
         }
         for kind in ["agent_message", "here_fork"] {
             assert_eq!(

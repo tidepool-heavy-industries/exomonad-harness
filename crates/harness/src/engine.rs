@@ -144,6 +144,9 @@ enum YieldReason {
 
 enum DispatchResult {
     NotCall,
+    Refused {
+        operation: OperationId,
+    },
     Registered {
         operation: OperationId,
     },
@@ -1308,6 +1311,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         let resuming = pending_head.is_some();
         let head = pending_head.or(head);
         *observed_head = head.clone();
+        if let Some(head) = &head {
+            self.provider.validate_resume(head)?;
+        }
         let recorded_response = if resuming {
             self.store
                 .recorded_response(head.as_ref().expect("pending request"))?
@@ -2001,6 +2007,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             let mut create = Box::pin(self.client.create_streaming(req, event_tx));
             let mut turn_call_ids = Vec::<CallId>::new();
             let mut turn_call_items = Vec::<(CallId, Item)>::new();
+            let mut inline_refused = Vec::new();
             let mut inline_settled = Vec::<(
                 OperationId,
                 Option<crate::store::RecordedWaitContinuation>,
@@ -2139,6 +2146,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                         turn_call_items.push((operation.call.clone(), call_item));
                                         inline_settled.push((operation, continuation, barrier, commit));
                                     }
+                                    Ok(DispatchResult::Refused { operation }) => {
+                                        turn_call_ids.push(operation.call.clone());
+                                        turn_call_items.push((operation.call.clone(), call_item));
+                                        inline_refused.push(operation);
+                                    }
                                     Ok(DispatchResult::NotCall) => {}
                                     Err(error) => deferred_dispatch_error = Some(error),
                                 }
@@ -2167,6 +2179,39 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     Err(error) => return Err(error),
                 }
             };
+            // Legacy SQL aggregates retain only known token subtotals. The
+            // versioned responses_usage event below owns completeness/raw facts;
+            // its absent counters and absent bill must never be inferred here.
+            let usage_for_store = StoredUsage {
+                input_tokens: i64::try_from(turn.usage.input_tokens.unwrap_or(0))
+                    .unwrap_or(i64::MAX),
+                output_tokens: i64::try_from(turn.usage.output_tokens.unwrap_or(0))
+                    .unwrap_or(i64::MAX),
+                cost_micros: 0,
+            };
+            let store = self.store.clone();
+            let request = parent.clone();
+            if let Err(error) = blocking(move || store.set_usage(&request, usage_for_store)).await {
+                return Err(error);
+            }
+            #[derive(serde::Serialize)]
+            struct ResponseUsage<'a> {
+                response_id: &'a str,
+                #[serde(flatten)]
+                usage: &'a Usage,
+            }
+            let usage = json!(ResponseUsage {
+                response_id: &turn.response_id,
+                usage: &turn.usage,
+            });
+            let store = self.store.clone();
+            let request = parent.clone();
+            if let Err(error) =
+                blocking(move || store.record_event(Some(&request), "responses_usage", &usage))
+                    .await
+            {
+                return Err(error);
+            }
             self.retain_transport_receipt(&parent, &mut transport_observation)
                 .await?;
             // A completed response can race the buffered final item events.
@@ -2253,6 +2298,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                             turn_call_items.push((operation.call.clone(), call_item));
                             inline_settled.push((operation, continuation, barrier, commit));
                         }
+                        Ok(DispatchResult::Refused { operation }) => {
+                            turn_call_ids.push(operation.call.clone());
+                            turn_call_items.push((operation.call.clone(), call_item));
+                            inline_refused.push(operation);
+                        }
                         Ok(DispatchResult::NotCall) => {}
                         Err(error) => {
                             return Err(error);
@@ -2335,6 +2385,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                                 turn_call_items.push((operation.call.clone(), item.clone()));
                                 inline_settled.push((operation, continuation, barrier, commit));
                             }
+                            Ok(DispatchResult::Refused { operation }) => {
+                                turn_call_ids.push(operation.call.clone());
+                                turn_call_items.push((operation.call.clone(), item.clone()));
+                                inline_refused.push(operation);
+                            }
                             Ok(DispatchResult::NotCall) => {
                                 return Err(EngineError::InvalidFunctionCall);
                             }
@@ -2346,39 +2401,6 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 }
             }
             if let Some(error) = deferred_dispatch_error {
-                return Err(error);
-            }
-            // Legacy SQL aggregates retain only known token subtotals. The
-            // versioned responses_usage event below owns completeness/raw facts;
-            // its absent counters and absent bill must never be inferred here.
-            let usage_for_store = StoredUsage {
-                input_tokens: i64::try_from(turn.usage.input_tokens.unwrap_or(0))
-                    .unwrap_or(i64::MAX),
-                output_tokens: i64::try_from(turn.usage.output_tokens.unwrap_or(0))
-                    .unwrap_or(i64::MAX),
-                cost_micros: 0,
-            };
-            let store = self.store.clone();
-            let request = parent.clone();
-            if let Err(error) = blocking(move || store.set_usage(&request, usage_for_store)).await {
-                return Err(error);
-            }
-            #[derive(serde::Serialize)]
-            struct ResponseUsage<'a> {
-                response_id: &'a str,
-                #[serde(flatten)]
-                usage: &'a Usage,
-            }
-            let usage = json!(ResponseUsage {
-                response_id: &turn.response_id,
-                usage: &turn.usage,
-            });
-            let store = self.store.clone();
-            let request = parent.clone();
-            if let Err(error) =
-                blocking(move || store.record_event(Some(&request), "responses_usage", &usage))
-                    .await
-            {
                 return Err(error);
             }
             previous_usage = turn.usage.clone();
@@ -2418,6 +2440,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                         return Err(error);
                     }
                 }
+            }
+
+            for operation in inline_refused {
+                let item = self
+                    .read_settled_output(&operation, &operation.request)
+                    .await?;
+                self.append_retaining_items(&parent, vec![item]).await?;
             }
 
             // Every response item and original invocation is now durable. Serial
@@ -2937,11 +2966,10 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
             return Ok(DispatchResult::NotCall);
         }
-        self.client
-            .response_contract()?
-            .0
+        let encoding = provider
             .tool_encoding_profile()
-            .validate_invocation_item(&item)?;
+            .unwrap_or(self.client.response_contract()?.0.tool_encoding_profile());
+        encoding.validate_invocation_item(&item)?;
         let call = item
             .tool_call()
             .map_err(|_| EngineError::InvalidFunctionCall)?
@@ -2975,12 +3003,30 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 return Err(EngineError::InvalidFunctionCall);
             }
             self.compose_tools(None, &provider.tool_manifest())?;
-            Some(WaitKind::Yield {
-                deadline: yield_deadline(&input)?,
-            })
+            match yield_deadline(&input) {
+                Ok(deadline) => Some(WaitKind::Yield { deadline }),
+                Err(EngineError::InvalidYieldArguments) => {
+                    let store = self.store.clone();
+                    let claim = operation.clone();
+                    let request_id = request.clone();
+                    blocking(move || store.claim_operation(&claim, &request_id)).await?;
+                    self.retain_settled_output(
+                        &operation,
+                        tool_kind,
+                        &crate::turn::JobOutput::Completed(Err(
+                            "yield expects an object with only an optional nonnegative `until` duration".into(),
+                        )),
+                        request,
+                    ).await?;
+                    return Ok(DispatchResult::Refused { operation });
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             provider.validate_call(&name, tool_kind)?;
-            (name == "wait_agent").then_some(WaitKind::Agent)
+            (name == "wait_agent"
+                && encoding != crate::transport::ToolEncodingProfile::FunctionResults)
+                .then_some(WaitKind::Agent)
         };
         if tool_kind == ToolKind::Custom
             && (crate::provider::is_harness_tool(&name) || name == FINALIZE_TOOL_NAME)

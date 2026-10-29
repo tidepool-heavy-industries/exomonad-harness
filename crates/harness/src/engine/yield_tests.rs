@@ -7,7 +7,10 @@ struct Offline;
 impl Auth for Offline {
     fn admission(
         &self,
-    ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError> {
+    ) -> std::result::Result<
+        crate::transport::NativeTransportAdmission,
+        crate::transport::TransportError,
+    > {
         crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
             "/offline/synthetic-credential",
         ))
@@ -756,4 +759,41 @@ async fn yield_pinned_embedded_surface_allows_intrinsic_without_host_authority()
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn malformed_yield_retains_refusal_and_allows_next_call() {
+    let (engine, requests, release) = engine(
+        vec![
+            turn(vec![
+                call("yield-call", "yield", json!({"until":"bad"})),
+                call("yield-bad-json", "yield", json!("{")),
+            ]),
+            turn(vec![call("work-call", "work", json!({}))]),
+            final_turn(),
+        ],
+        false,
+    );
+    release.notify_one();
+    let (_cancel, cancel) = watch::channel(false);
+    let (_mail, mail) = tokio::sync::mpsc::unbounded_channel::<DurableMailboxWake>();
+    let completed = engine
+        .run_embedded(None, vec![], cancel, mail)
+        .await
+        .unwrap();
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    let refusal = completed
+        .transcript
+        .iter()
+        .find(|item| item.0["type"] == "function_call_output" && item.0["call_id"] == "yield-call")
+        .unwrap();
+    assert!(
+        refusal.0["output"]
+            .as_str()
+            .unwrap()
+            .contains("yield expects")
+    );
+    let acknowledged = engine.provider.acknowledgments.lock().unwrap();
+    assert_eq!(acknowledged.len(), 1);
+    assert_eq!(acknowledged[0].call.0, "work-call");
 }

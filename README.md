@@ -128,6 +128,21 @@ inference. Activation-scoped settlement must use `BeforeNextInference`; async
 settlement is refused before claim or dispatch. Output JSON, tool names,
 schema equality, passive replay and Store reopen issue no terminal authority.
 
+An embedded host can install `ToolEncodingProfile::FunctionResults` through
+`HostActor::tool_encoding_profile`. This contract advertises flat function tools,
+starts independent handlers as completed calls arrive, and waits for every
+actual result before the next inference. A domain launch receipt is a result;
+Harness does not invent task receipts for a still-running handler. Scheduling
+remains host-owned and independent of result delivery. Custom tools are refused
+at installation under this profile; other hosts retain their native encodings.
+
+Function call identity is parsed independently of arguments. Malformed JSON,
+missing arguments and non-object arguments retain `ToolInput::InvalidFunction`
+for the owning dispatcher's ordinary refusal. Engine-owned `yield` retains its
+own argument refusal. Identity/provenance conflicts remain errors. The installed
+encoding is retained with each request; a FunctionResults host refuses legacy
+history at the inference-resume gate without disabling inspection or cleanup.
+
 ## Focused tests
 
 ### Native Buck2 on x86_64 Linux

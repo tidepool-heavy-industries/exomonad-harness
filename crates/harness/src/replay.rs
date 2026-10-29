@@ -52,7 +52,7 @@ impl std::ops::Deref for ReplayTurn {
 struct RecordedCall {
     name: String,
     kind: ToolKind,
-    input: serde_json::Value,
+    input: ToolInput,
     issued: usize,
 }
 
@@ -166,12 +166,8 @@ impl ReplayProvider {
                     if !persisted.iter().any(|saved| saved == item) {
                         return Err(ReplayError::MissingInvocation(call.call_id.0));
                     }
-                    let (kind, input) = match call.input {
-                        ToolInput::Function(arguments) => (ToolKind::Function, arguments),
-                        ToolInput::Custom(text) => {
-                            (ToolKind::Custom, serde_json::Value::String(text))
-                        }
-                    };
+                    let kind = call.input.kind();
+                    let input = call.input;
                     let Some(id) =
                         store.recorded_operation_for_request(&turn.request, &call.call_id)?
                     else {
@@ -234,12 +230,8 @@ impl ReplayProvider {
         let recorded_call = self.calls.get(&recorded_operation).ok_or_else(|| {
             ProviderError::Tool(format!("no recorded tool call for `{}`", local.call.0).into())
         })?;
-        let (input_kind, args) = match input {
-            ToolInput::Function(args) => (ToolKind::Function, args.clone()),
-            ToolInput::Custom(text) => (ToolKind::Custom, serde_json::Value::String(text.clone())),
-        };
         let kind = &recorded_call.kind;
-        if recorded_call.name != name || *kind != input_kind || recorded_call.input != args {
+        if recorded_call.name != name || *kind != input.kind() || &recorded_call.input != input {
             return Err(ProviderError::Tool(
                 format!(
                     "replay call `{}` does not match its recorded identity or input",
@@ -466,11 +458,7 @@ impl ReplayProvider {
             let Some(operation) = self.local_operation(original, local) else {
                 continue;
             };
-            let (_, output) = self.recorded_job_output(
-                &call.name,
-                &ToolInput::Function(call.input.clone()),
-                &operation,
-            )?;
+            let (_, output) = self.recorded_job_output(&call.name, &call.input, &operation)?;
             if let Some((output_cut, output_position)) = self.output_cut(original, &output)? {
                 if output_cut == cut && output_position < position {
                     waits.push(operation);
@@ -544,11 +532,7 @@ impl ReplayProvider {
                 let Some(operation) = self.local_operation(original, local) else {
                     continue;
                 };
-                let (_, output) = self.recorded_job_output(
-                    &call.name,
-                    &ToolInput::Function(call.input.clone()),
-                    &operation,
-                )?;
+                let (_, output) = self.recorded_job_output(&call.name, &call.input, &operation)?;
                 if let Some((other_cut, other_position)) = self.output_cut(original, &output)? {
                     if other_cut == index && other_position > position {
                         next_wait = next_wait.min(other_position);
@@ -562,17 +546,7 @@ impl ReplayProvider {
                 let Some(operation) = self.local_operation(original, local) else {
                     continue;
                 };
-                let input = match call.kind {
-                    ToolKind::Function => ToolInput::Function(call.input.clone()),
-                    ToolKind::Custom => ToolInput::Custom(
-                        call.input
-                            .as_str()
-                            .ok_or_else(|| {
-                                ProviderError::Tool("malformed recorded custom input".into())
-                            })?
-                            .to_owned(),
-                    ),
-                };
+                let input = call.input.clone();
                 let (_, output) = self.recorded_job_output(&call.name, &input, &operation)?;
                 if let Some((output_cut, output_position)) = self.output_cut(original, &output)? {
                     if output_cut == index {
@@ -744,6 +718,79 @@ impl ResponsesTransport for Arc<ReplayProvider> {
 
 #[async_trait]
 impl Provider for ReplayProvider {
+    async fn request_snapshot_with_encoding(
+        &self,
+        _profile: crate::transport::ToolEncodingProfile,
+    ) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
+        // Replay sends the retained wire manifest and resolves each call from
+        // its issuing policy, never a newly installed transport projection.
+        Ok(None)
+    }
+
+    fn operation_execution(
+        &self,
+        local: &OperationId,
+        call: &crate::item::ToolCall,
+        profile: crate::transport::ToolEncodingProfile,
+    ) -> Result<crate::item::ToolExecution, ProviderError> {
+        let original_request = lock(&self.progress.local_requests)
+            .get(&local.request)
+            .map(|request| request.original.clone())
+            .ok_or_else(|| ProviderError::Tool("replay delivery has no matched request".into()))?;
+        let original = self
+            .store
+            .recorded_operation_for_request(&original_request, &local.call)
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?
+            .ok_or_else(|| {
+                ProviderError::Tool("replay delivery has no recorded operation".into())
+            })?;
+        if self
+            .calls
+            .get(&original)
+            .is_none_or(|recorded| recorded.name != call.name || recorded.input != call.input)
+        {
+            return Err(ProviderError::Tool(
+                "replay delivery invocation mismatch".into(),
+            ));
+        }
+        let mut selected = None;
+        for event in self
+            .store
+            .events(Some(&original_request))
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?
+            .into_iter()
+            .filter(|event| event.kind == "tool_scheduling")
+        {
+            let value: serde_json::Value = serde_json::from_str(&event.payload)
+                .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
+            if value["operation"] != serde_json::to_value(&original).expect("operation serializes")
+            {
+                continue;
+            }
+            let execution = match value["execution"].as_str() {
+                Some("wait") => crate::item::ToolExecution::Synchronous,
+                Some("background") => crate::item::ToolExecution::Asynchronous,
+                None if profile == crate::transport::ToolEncodingProfile::Native => call.execution,
+                _ => {
+                    return Err(ProviderError::Tool(
+                        "missing recorded delivery policy".into(),
+                    ));
+                }
+            };
+            if selected.is_some_and(|prior| prior != execution) {
+                return Err(ProviderError::Tool(
+                    "conflicting recorded delivery policies".into(),
+                ));
+            }
+            selected = Some(execution);
+        }
+        selected
+            .or_else(|| {
+                (profile == crate::transport::ToolEncodingProfile::Native).then_some(call.execution)
+            })
+            .ok_or_else(|| ProviderError::Tool("missing recorded delivery policy".into()))
+    }
+
     fn operation_scheduling(
         &self,
         name: &str,
@@ -1099,8 +1146,10 @@ mod tests {
     impl Auth for OfflineAuth {
         fn admission(
             &self,
-        ) -> std::result::Result<crate::transport::NativeTransportAdmission, crate::transport::TransportError>
-        {
+        ) -> std::result::Result<
+            crate::transport::NativeTransportAdmission,
+            crate::transport::TransportError,
+        > {
             crate::transport::NativeTransportAdmission::chatgpt_plan(std::path::PathBuf::from(
                 "/offline/synthetic-credential",
             ))

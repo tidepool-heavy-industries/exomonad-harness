@@ -175,10 +175,18 @@ fn project(step: Value, display_id: &str) -> Result<Item, UnsupportedSemantics> 
         .as_str()
         .ok_or(UnsupportedSemantics::InputItem)?;
     let mut value = match kind {
-        "function_call" => json!({"type":"function_call","id":display_id,
+        "function_call" => {
+            let mut call = json!({"type":"function_call","id":display_id,
             "call_id":step["id"].as_str().filter(|s| !s.is_empty()).ok_or(UnsupportedSemantics::InputItem)?,
-            "name":step["name"].as_str().filter(|s| !s.is_empty()).ok_or(UnsupportedSemantics::InputItem)?,
-            "arguments":step["arguments"].as_object().ok_or(UnsupportedSemantics::InputItem)?}),
+            "name":step["name"].as_str().filter(|s| !s.is_empty()).ok_or(UnsupportedSemantics::InputItem)?});
+            if let Some(arguments) = step.get("arguments") {
+                // Interactions owns a JSON value; the canonical Responses field
+                // owns encoded JSON. Encode once so a native string cannot be
+                // reinterpreted as an object by the invocation parser.
+                call["arguments"] = Value::String(arguments.to_string());
+            }
+            call
+        }
         "thought" => {
             if step
                 .get("signature")
@@ -436,9 +444,10 @@ impl Assembly {
                     return Err(ProtocolFault::Invalid("duplicate step stop"));
                 }
                 if let Some(arguments) = step.arguments.take() {
-                    step.native["arguments"] = serde_json::from_str(&arguments).map_err(|_| {
-                        ProtocolFault::Invalid("invalid completed function arguments")
-                    })?;
+                    // A finalized call with malformed arguments still has an
+                    // accountable identity. Retain the text for owned refusal.
+                    step.native["arguments"] =
+                        serde_json::from_str(&arguments).unwrap_or(Value::String(arguments));
                 }
                 step.stopped = true;
             }

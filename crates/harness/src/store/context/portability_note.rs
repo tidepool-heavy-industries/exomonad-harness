@@ -183,14 +183,9 @@ fn project_tool_call(object: &Map<String, Value>, custom: bool) -> Result<(Value
             .get("input")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("tool_call", "input"))?;
-    } else {
-        let arguments = object
-            .get("arguments")
-            .ok_or_else(|| invalid("tool_call", "arguments"))?;
-        if !matches!(arguments, Value::String(_) | Value::Object(_)) {
-            return Err(invalid("tool_call", "arguments"));
-        }
     }
+    // Argument refusals are conversation evidence too. Preserve their original
+    // payload; identity validation is independent of argument admission.
     if let Some(namespace) = object.get("namespace") {
         if !namespace.is_null() && namespace.as_str() != Some("functions") {
             return Err(invalid("tool_call", "namespace"));

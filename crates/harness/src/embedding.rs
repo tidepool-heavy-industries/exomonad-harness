@@ -273,6 +273,11 @@ pub enum HostControlError {
 /// Capability supplied by the embedding, never selected by model arguments.
 #[async_trait]
 pub trait HostActor: Send + Sync {
+    /// An installed host contract may be stricter than its provider route.
+    /// Recovery uses the same contract before reclaiming any operation.
+    fn tool_encoding_profile(&self) -> Option<ToolEncodingProfile> {
+        None
+    }
     fn identity(&self) -> &HostIdentity;
     fn active_round(&self) -> Option<EmbeddedRoundId> {
         None
@@ -789,6 +794,19 @@ struct PinnedProvider {
     surface: Arc<ToolSurface>,
 }
 impl PinnedProvider {
+    fn admits_call_kind(&self, name: &str, kind: ToolKind) -> bool {
+        match self.surface.manifest.kinds.get(name) {
+            Some(declared) => *declared == kind,
+            None => {
+                kind == ToolKind::Function
+                    && self
+                        .surface
+                        .encoding
+                        .as_ref()
+                        .is_some_and(|map| map.profile() == ToolEncodingProfile::FunctionResults)
+            }
+        }
+    }
     async fn validate(
         &self,
         name: &str,
@@ -827,7 +845,7 @@ impl PinnedProvider {
         if stored.branch != context.agent.0 {
             return Err(fail("foreign request call"));
         }
-        if self.surface.manifest.kinds.get(name) != Some(&input.kind()) {
+        if !self.admits_call_kind(name, input.kind()) {
             return Err(fail("call does not match issuing tool surface"));
         }
         let recorded = self
@@ -858,6 +876,53 @@ impl PinnedProvider {
 }
 #[async_trait]
 impl Provider for BoundProvider {
+    fn tool_encoding_profile(&self) -> Option<crate::transport::ToolEncodingProfile> {
+        self.host.tool_encoding_profile()
+    }
+
+    fn validate_resume(&self, head: &crate::model::RequestId) -> Result<(), ProviderError> {
+        if self.host.tool_encoding_profile() != Some(ToolEncodingProfile::FunctionResults) {
+            return Ok(());
+        }
+        let fail = |message: String| ProviderError::Tool(message.into());
+        let mut cursor = Some(head.clone());
+        let mut seen = std::collections::HashSet::new();
+        while let Some(request) = cursor {
+            if !seen.insert(request.clone()) {
+                return Err(fail("cyclic retained request ancestry".into()));
+            }
+            if let Some(surface) = self
+                .store
+                .latest_tool_surface(&request)
+                .map_err(|error| fail(error.to_string()))?
+            {
+                let map: EncodingMap = serde_json::from_value(surface["encoding"].clone())
+                    .map_err(|_| fail("legacy tool contract cannot resume as function results; start a new run".into()))?;
+                if map.profile() != ToolEncodingProfile::FunctionResults {
+                    return Err(fail(
+                        "legacy tool contract cannot resume as function results; start a new run"
+                            .into(),
+                    ));
+                }
+            } else if self
+                .store
+                .recorded_response(&request)
+                .map_err(|error| fail(error.to_string()))?
+                .is_some()
+            {
+                return Err(fail(
+                    "retained response has no issuing function-results contract".into(),
+                ));
+            }
+            cursor = self
+                .store
+                .request(&request)
+                .map_err(|error| fail(error.to_string()))?
+                .ok_or_else(|| fail("missing retained request".into()))?
+                .parent;
+        }
+        Ok(())
+    }
     async fn output_retained(
         &self,
         operation: &crate::model::OperationId,
@@ -920,7 +985,12 @@ impl Provider for BoundProvider {
         call: &crate::item::ToolCall,
         profile: ToolEncodingProfile,
     ) -> Result<crate::item::ToolExecution, ProviderError> {
-        tool_encoding::recorded_execution(&self.store, operation, call, profile)
+        tool_encoding::recorded_execution(
+            &self.store,
+            operation,
+            call,
+            self.host.tool_encoding_profile().unwrap_or(profile),
+        )
     }
 
     async fn request_snapshot(&self) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
@@ -932,6 +1002,7 @@ impl Provider for BoundProvider {
         &self,
         profile: ToolEncodingProfile,
     ) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
+        let profile = self.host.tool_encoding_profile().unwrap_or(profile);
         let surface = self
             .host
             .tool_surface()
@@ -966,6 +1037,10 @@ impl Provider for BoundProvider {
 }
 #[async_trait]
 impl Provider for PinnedProvider {
+    fn tool_encoding_profile(&self) -> Option<crate::transport::ToolEncodingProfile> {
+        self.surface.encoding.as_ref().map(|map| map.profile())
+    }
+
     fn model_visible_item(
         &self,
         request: &crate::model::RequestId,
@@ -1014,6 +1089,9 @@ impl Provider for PinnedProvider {
     ) -> Result<crate::item::ToolExecution, ProviderError> {
         let _ = operation;
         match (&self.surface.encoding, profile) {
+            (Some(map), _) if map.profile() == ToolEncodingProfile::FunctionResults => {
+                map.execution(call)
+            }
             (Some(map), ToolEncodingProfile::FunctionOnlyExplicitDelivery) => map.execution(call),
             (None, ToolEncodingProfile::Native) => Ok(call.execution),
             _ => Err(ProviderError::Tool(
@@ -1023,7 +1101,7 @@ impl Provider for PinnedProvider {
     }
 
     fn validate_call(&self, name: &str, kind: ToolKind) -> Result<(), ProviderError> {
-        if self.surface.manifest.kinds.get(name) == Some(&kind) {
+        if self.admits_call_kind(name, kind) {
             Ok(())
         } else {
             Err(ProviderError::Tool(
@@ -1089,6 +1167,9 @@ impl Provider for PinnedProvider {
             None => input,
         };
         match input {
+            ToolInput::InvalidFunction { reason, .. } => {
+                Err(ProviderError::Tool(reason.to_string().into()))
+            }
             ToolInput::Function(args) => {
                 self.surface
                     .dispatcher
@@ -1834,3 +1915,7 @@ mod tests {
         assert!(EmbeddedToolManifest::new(vec![unchecked_nested]).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "embedding/function_results_tests.rs"]
+mod function_results_tests;

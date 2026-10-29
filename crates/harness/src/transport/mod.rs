@@ -351,6 +351,9 @@ fn diagnostic_suffix(diagnostic: Option<&HttpDiagnostic>) -> String {
 pub enum ToolEncodingProfile {
     Native,
     FunctionOnlyExplicitDelivery,
+    /// Flat function arguments; every invocation delivers its actual result
+    /// before the next inference, independently of handler start scheduling.
+    FunctionResults,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
