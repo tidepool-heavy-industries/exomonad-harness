@@ -5,7 +5,7 @@ use crate::{
     item::{Item, ItemHash},
     model::{OperationId, RequestId},
 };
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) struct PublishedOperationOutput {
@@ -300,6 +300,50 @@ impl Store {
         transaction_span.record("committed", true);
         transaction_span.record("appended", output.appended);
         Ok(output)
+    }
+
+    /// Publish a retained wait and its issuer-sealed continuation atomically.
+    pub(crate) fn append_wait_output(
+        &self,
+        operation: &OperationId,
+        claimant: &RequestId,
+        request: &RequestId,
+        continuation: Option<super::RecordedWaitContinuation>,
+    ) -> Result<(Item, Vec<(Item, ItemHash)>)> {
+        let mut connection = self.lock()?;
+        connection.write_transaction(|tx| {
+            let output = append_tx(tx, operation, claimant, request)?;
+            let items = match continuation {
+                Some(continuation) => continuation.into_items(operation, &output.item)?,
+                None => vec![],
+            };
+            let mut published = Vec::new();
+            if output.appended { published.push((output.item.clone(), output.hash.clone())); }
+            let owner = serde_json::to_string(operation)?;
+            let position: i64 = tx.query_row(
+                "SELECT position FROM request_items WHERE request_id=?1 AND output_operation=?2",
+                params![request.0, owner], |row| row.get(0),
+            )?;
+            for (offset, item) in items.into_iter().enumerate() {
+                let position = position + 1 + offset as i64;
+                require_ordinary(&item, request, position)?;
+                let hash = Store::put_item_tx(tx, &item)?;
+                let existing: Option<String> = tx.query_row(
+                    "SELECT item_hash FROM request_items WHERE request_id=?1 AND position=?2",
+                    params![request.0, position], |row| row.get(0),
+                ).optional()?;
+                match existing {
+                    Some(existing) if existing == hash.0 => {}
+                    Some(_) => return Err(invalid(operation, claimant)),
+                    None => {
+                        tx.execute("INSERT INTO request_items(request_id,position,item_hash) VALUES (?1,?2,?3)", params![request.0, position, hash.0])?;
+                        super::chat::publish(tx, request, position, &hash, &item)?;
+                        published.push((item, hash));
+                    }
+                }
+            }
+            Ok((output.item, published))
+        })
     }
 
     pub(crate) fn recovery_history(&self, head: &RequestId) -> Result<Vec<RecoveryItem>> {

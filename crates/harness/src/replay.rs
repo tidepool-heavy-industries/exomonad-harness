@@ -34,12 +34,14 @@ pub struct ReplayProvider {
     turns: Arc<[ReplayTurn]>,
     progress: Arc<ReplayProgress>,
     tool_schemas: crate::transport::ToolManifest,
-    calls: HashMap<OperationId, RecordedCall>,
+    calls: Arc<HashMap<OperationId, RecordedCall>>,
+    surface: Option<serde_json::Value>,
 }
 
 struct ReplayTurn {
     record: RecordedReplayTurn,
     purpose: crate::store::ProviderRequestPurpose,
+    encoding: Option<crate::embedding::tool_encoding::EncodingMap>,
 }
 
 impl std::ops::Deref for ReplayTurn {
@@ -54,6 +56,7 @@ struct RecordedCall {
     kind: ToolKind,
     input: ToolInput,
     issued: usize,
+    is_wait: bool,
 }
 
 struct ReplayProgress {
@@ -150,7 +153,22 @@ impl ReplayProvider {
                 let purpose = store
                     .provider_request_purpose(&record.request)?
                     .unwrap_or(crate::store::ProviderRequestPurpose::Inference);
-                Ok(ReplayTurn { record, purpose })
+                let encoding = store
+                    .latest_tool_surface(&record.request)?
+                    .and_then(|surface| {
+                        surface
+                            .get("encoding")
+                            .filter(|value| !value.is_null())
+                            .cloned()
+                    })
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(StoreError::from)?;
+                Ok(ReplayTurn {
+                    record,
+                    purpose,
+                    encoding,
+                })
             })
             .collect::<Result<Vec<_>, ReplayError>>()?;
         let mut tool_schemas = None;
@@ -180,6 +198,8 @@ impl ReplayProvider {
                         .insert(
                             id.clone(),
                             RecordedCall {
+                                is_wait: call.name == "wait_agent" && turn.encoding.as_ref()
+                                    .is_none_or(|map| map.profile() != crate::transport::ToolEncodingProfile::FunctionResults),
                                 name: call.name,
                                 kind,
                                 input,
@@ -202,7 +222,8 @@ impl ReplayProvider {
                 changed: Notify::new(),
             }),
             tool_schemas: tool_schemas.unwrap_or_default(),
-            calls,
+            calls: Arc::new(calls),
+            surface: None,
         })
     }
 
@@ -451,8 +472,8 @@ impl ReplayProvider {
         local: &OperationId,
     ) -> Result<Vec<OperationId>, ProviderError> {
         let mut waits = vec![];
-        for (original, call) in &self.calls {
-            if call.issued >= cut || call.name != "wait_agent" {
+        for (original, call) in self.calls.iter() {
+            if call.issued >= cut || !call.is_wait {
                 continue;
             }
             let Some(operation) = self.local_operation(original, local) else {
@@ -476,9 +497,8 @@ impl ReplayProvider {
     ) -> Result<RetainedOutput, ProviderError> {
         let (original, output) = self.recorded_job_output(name, input, local)?;
         let cut = self.output_cut(&original, &output)?;
-        if name == "wait_agent"
-            && cut.map(|(index, _)| index) != Some(self.calls[&original].issued + 1)
-        {
+        let is_wait = self.calls[&original].is_wait;
+        if is_wait && cut.map(|(index, _)| index) != Some(self.calls[&original].issued + 1) {
             return Err(ProviderError::Tool(
                 "recorded wait has no immediate immutable successor input boundary".into(),
             ));
@@ -489,7 +509,7 @@ impl ReplayProvider {
             changed.as_mut().enable();
             let ready_turn = cut.map(|(index, _)| index).unwrap_or(self.turns.len());
             let ready = *lock(&self.progress.cursor) >= ready_turn;
-            let preceding_waits = if name == "wait_agent" {
+            let preceding_waits = if is_wait {
                 vec![]
             } else {
                 match cut {
@@ -510,7 +530,7 @@ impl ReplayProvider {
             }
             changed.await;
         }
-        if name != "wait_agent" {
+        if !is_wait {
             return Ok(RetainedOutput::terminal(output));
         }
         let next = cut.and_then(|(index, _)| self.turns.get(index));
@@ -525,8 +545,8 @@ impl ReplayProvider {
         let mut after = vec![];
         if let Some((index, position)) = cut {
             let mut next_wait = self.turns[index].model_request.input.len();
-            for (original, call) in &self.calls {
-                if call.name != "wait_agent" || call.issued >= index {
+            for (original, call) in self.calls.iter() {
+                if !call.is_wait || call.issued >= index {
                     continue;
                 }
                 let Some(operation) = self.local_operation(original, local) else {
@@ -539,8 +559,8 @@ impl ReplayProvider {
                     }
                 }
             }
-            for (original, call) in &self.calls {
-                if call.name == "wait_agent" {
+            for (original, call) in self.calls.iter() {
+                if call.is_wait {
                     continue;
                 }
                 let Some(operation) = self.local_operation(original, local) else {
@@ -718,13 +738,57 @@ impl ResponsesTransport for Arc<ReplayProvider> {
 
 #[async_trait]
 impl Provider for ReplayProvider {
+    fn tool_surface_evidence(&self) -> Option<serde_json::Value> {
+        self.surface.clone()
+    }
+
+    fn operation_encoding_profile(
+        &self,
+        local: &OperationId,
+        route: crate::transport::ToolEncodingProfile,
+    ) -> Result<crate::transport::ToolEncodingProfile, ProviderError> {
+        let original_request = lock(&self.progress.local_requests)
+            .get(&local.request)
+            .map(|request| request.original.clone())
+            .ok_or_else(|| ProviderError::Tool("replay encoding has no matched request".into()))?;
+        let turn = self
+            .turns
+            .iter()
+            .find(|turn| turn.request == original_request)
+            .ok_or_else(|| ProviderError::Tool("replay encoding has no issuing request".into()))?;
+        Ok(turn
+            .encoding
+            .as_ref()
+            .map(|map| map.profile())
+            .unwrap_or(route))
+    }
+
     async fn request_snapshot_with_encoding(
         &self,
         _profile: crate::transport::ToolEncodingProfile,
     ) -> Result<Option<Arc<dyn Provider>>, ProviderError> {
-        // Replay sends the retained wire manifest and resolves each call from
-        // its issuing policy, never a newly installed transport projection.
-        Ok(None)
+        // Pin the next inference's declaration evidence before dispatch. The
+        // transport and snapshot share progress, but later turns cannot change
+        // the surface recorded with this request's operations.
+        let cursor = *lock(&self.progress.cursor);
+        let turn = self
+            .turns
+            .iter()
+            .skip(cursor)
+            .find(|turn| turn.purpose == crate::store::ProviderRequestPurpose::Inference)
+            .ok_or_else(|| ProviderError::Tool("replay has no next inference surface".into()))?;
+        let surface = self
+            .store
+            .latest_tool_surface(&turn.request)
+            .map_err(|error| ProviderError::Tool(error.to_string().into()))?;
+        Ok(Some(Arc::new(Self {
+            store: self.store.clone(),
+            turns: self.turns.clone(),
+            progress: self.progress.clone(),
+            tool_schemas: turn.model_request.tools.clone(),
+            calls: self.calls.clone(),
+            surface,
+        })))
     }
 
     fn operation_execution(
@@ -752,6 +816,14 @@ impl Provider for ReplayProvider {
             return Err(ProviderError::Tool(
                 "replay delivery invocation mismatch".into(),
             ));
+        }
+        if profile != crate::transport::ToolEncodingProfile::Native {
+            return crate::embedding::tool_encoding::recorded_execution(
+                &self.store,
+                &original,
+                call,
+                profile,
+            );
         }
         let mut selected = None;
         for event in self
@@ -1180,6 +1252,7 @@ mod tests {
             vec![json!({
                 "type":"function",
                 "name":"echo",
+                "strict":true,
                 "description":"Return the supplied value.",
                 "parameters":{
                     "type":"object",
@@ -1279,7 +1352,7 @@ mod tests {
 
     fn request(session_id: &str) -> ResponsesRequest {
         ResponsesRequest {
-            input: vec![Item(json!({"type":"message","role":"user","content":[]}))],
+            input: vec![Item::user_text("fixture")],
             instructions: "offline".into(),
             tools: vec![].into(),
             tools_allowed: None,
@@ -1766,28 +1839,30 @@ mod tests {
         tombstone: bool,
         kind: ToolKind,
     ) -> (Arc<Store>, RequestId, CallId) {
+        recorded_terminal_named_in(store, output, tombstone, kind, "echo", json!("{}"))
+    }
+
+    fn recorded_terminal_named_in(
+        store: Arc<Store>,
+        output: &JobOutput,
+        tombstone: bool,
+        kind: ToolKind,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> (Arc<Store>, RequestId, CallId) {
         let root = RequestId("terminal-root".into());
         let call_id = CallId("terminal-call".into());
         let call = Item(match kind {
             ToolKind::Function => {
-                json!({"type":"function_call", "call_id":call_id.0, "name":"echo", "arguments":"{}"})
+                json!({"type":"function_call", "call_id":call_id.0, "name":name, "arguments":arguments})
             }
             ToolKind::Custom => {
-                json!({"type":"custom_tool_call", "call_id":call_id.0, "name":"echo", "input":"raw prefix"})
+                json!({"type":"custom_tool_call", "call_id":call_id.0, "name":name, "input":"raw prefix"})
             }
         });
         store.create_request(&root, None, "/root").unwrap();
         store
-            .append_items(&root, std::slice::from_ref(&call))
-            .unwrap();
-        let operation = store.claim(&call_id, &root).unwrap();
-        if tombstone {
-            store.interrupt_operation_claim(&operation, &root).unwrap();
-        } else {
-            store.write_job_output(&operation, kind, output).unwrap();
-        }
-        store
-            .record_replay_turn(
+            .record_replay_turn_for_target(
                 &root,
                 &request("terminal-session"),
                 &ResponsesTurn {
@@ -1795,9 +1870,91 @@ mod tests {
                     items: vec![call],
                     usage: Usage::default(),
                 },
+                crate::transport::ResponsesRoute::ChatGptPlan,
+                crate::transport::ResponsesProtocol::Standard,
             )
             .unwrap();
+        let operation = store.claim(&call_id, &root).unwrap();
+        if tombstone {
+            store.interrupt_operation_claim(&operation, &root).unwrap();
+        } else {
+            store.write_job_output(&operation, kind, output).unwrap();
+        }
         (store, root, call_id)
+    }
+
+    #[tokio::test]
+    async fn portable_refusal_replays_with_issuing_profile_and_without_wait_authority() {
+        use crate::transport::ToolEncodingProfile;
+        for arguments in [json!("{}"), json!("{")] {
+            let expected = JobOutput::Completed(Err("owned refusal".into()));
+            let (store, root, call) = recorded_terminal_named_in(
+                Arc::new(Store::memory().unwrap()),
+                &expected,
+                false,
+                ToolKind::Function,
+                "wait_agent",
+                arguments,
+            );
+            let original = store.claims_on(&root).unwrap()[0].operation.clone();
+            let manifest = crate::embedding::EmbeddedToolManifest::new(vec![json!({
+                "type":"function","name":"echo","strict":true,"parameters":{
+                    "type":"object","properties":{},"required":[],"additionalProperties":false
+                }
+            })])
+            .unwrap();
+            let (_, map) = crate::embedding::tool_encoding::EncodingMap::project(
+                &manifest,
+                ToolEncodingProfile::FunctionResults,
+            )
+            .unwrap();
+            let surface = json!({"version":"portable","encoding":map});
+            store
+                .record_event(Some(&root), "tool_surface", &surface)
+                .unwrap();
+            store.record_event(Some(&root), "tool_scheduling", &json!({
+                "operation":original,"surface":surface,"execution":"wait","scheduling":crate::provider::ToolScheduling::Async
+            })).unwrap();
+            let provider = ReplayProvider::new(store.clone(), &root).unwrap();
+            let snapshot = provider
+                .request_snapshot_with_encoding(ToolEncodingProfile::Native)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot.tool_surface_evidence(), Some(surface));
+            let local = RequestId("replay-direct".into());
+            let (sink, _stream) = tokio::sync::mpsc::channel(4);
+            stream_test_request(&provider, &local, request("terminal-session"), sink)
+                .await
+                .unwrap();
+            let operation = call_context(call).operation.unwrap();
+            let invocation = store
+                .invocation_item(&original.request, &original.call)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                snapshot
+                    .operation_encoding_profile(&operation, ToolEncodingProfile::Native)
+                    .unwrap(),
+                ToolEncodingProfile::FunctionResults
+            );
+            assert_eq!(
+                snapshot
+                    .operation_execution(
+                        &operation,
+                        &invocation,
+                        ToolEncodingProfile::FunctionResults
+                    )
+                    .unwrap(),
+                crate::item::ToolExecution::Synchronous
+            );
+            let restored = snapshot
+                .retained_output("wait_agent", &invocation.input, &operation)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(restored.output(), &expected);
+        }
     }
 
     #[tokio::test]
@@ -2351,7 +2508,12 @@ mod tests {
         let (store, root, call) = recorded_terminal(&JobOutput::Completed(Ok(json!({}))), false);
         let mut provider = ReplayProvider::new(store, &root).unwrap();
         let original = provider.calls.keys().next().unwrap().clone();
-        provider.calls.get_mut(&original).unwrap().name = "wait_agent".into();
+        let recorded = Arc::get_mut(&mut provider.calls)
+            .unwrap()
+            .get_mut(&original)
+            .unwrap();
+        recorded.name = "wait_agent".into();
+        recorded.is_wait = true;
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
         stream_test_request(
             &provider,

@@ -1381,10 +1381,9 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     record.item.0["type"].as_str(),
                     Some("function_call" | "custom_tool_call")
                 ) {
-                    self.client
-                        .response_contract()?
-                        .0
+                    self.provider
                         .tool_encoding_profile()
+                        .unwrap_or(self.client.response_contract()?.0.tool_encoding_profile())
                         .validate_invocation_item(&record.item)?;
                 }
                 let Some(call) = record
@@ -1502,7 +1501,11 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 replay_items.push((claim.operation, claim.request));
                 continue;
             }
-            if matches!(invocation.name.as_str(), "wait_agent" | "yield") {
+            if invocation.name == "yield"
+                || (invocation.name == "wait_agent"
+                    && self.provider.tool_encoding_profile()
+                        != Some(crate::transport::ToolEncodingProfile::FunctionResults))
+            {
                 return Err(EngineError::UnresumableForkedWaitAgent);
             }
             // Validate every pending job before claiming any of them. The
@@ -2443,10 +2446,8 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
             }
 
             for operation in inline_refused {
-                let item = self
-                    .read_settled_output(&operation, &operation.request)
+                self.publish_operation_output(&parent, &operation, &operation.request)
                     .await?;
-                self.append_retaining_items(&parent, vec![item]).await?;
             }
 
             // Every response item and original invocation is now durable. Serial
@@ -2500,33 +2501,13 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                 if commit.is_some() && settled_this_turn.operations != barrier.before {
                     return Err(EngineError::ClaimRecoveryConflict(operation.call.0.clone()));
                 }
-                let item = match self
-                    .read_settled_output(&operation, &operation.request)
-                    .await
-                {
-                    Ok(item) => item,
-                    Err(error) => return Err(error),
-                };
-                let mut attached = vec![item];
-                if let Some(continuation) = continuation {
-                    match continuation.into_items(&operation, &attached[0]) {
-                        Ok(items) => attached.extend(items),
-                        Err(error) => {
-                            return Err(error.into());
-                        }
-                    }
-                }
-                let published = match self.append_retaining_items(&parent, attached).await {
-                    Ok(items) => items,
-                    Err(error) => return Err(error),
-                };
+                let item = self
+                    .publish_wait_output(&parent, &operation, continuation)
+                    .await?;
                 let recorded_wait = commit.is_some();
                 if let Some(commit) = commit {
-                    if let Err(error) = commit.commit(&operation, &published[0]) {
-                        return Err(error.into());
-                    }
+                    commit.commit(&operation, &item)?;
                 }
-                drop(published);
                 if let Err(error) = self.acknowledge_output(&operation).await {
                     return Err(error);
                 }
@@ -2757,6 +2738,42 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         .await
     }
 
+    async fn publish_wait_output(
+        &self,
+        request: &RequestId,
+        operation: &OperationId,
+        continuation: Option<crate::store::RecordedWaitContinuation>,
+    ) -> Result<Item, EngineError> {
+        let store = self.store.clone();
+        let target = request.clone();
+        let call = operation.clone();
+        let observing = self.output_observer.is_some();
+        let (item, published, origin) = blocking(move || {
+            let (item, published) =
+                store.append_wait_output(&call, &call.request, &target, continuation)?;
+            let origin = if observing {
+                Some(store.request_output_origin(&target)?)
+            } else {
+                None
+            };
+            Ok((item, published, origin))
+        })
+        .await?;
+        if let (Some(observer), Some(origin)) = (&self.output_observer, origin) {
+            for (item, hash) in published {
+                observer.observe(ModelOutput {
+                    origin: origin.clone(),
+                    request_id: request.clone(),
+                    update: ModelOutputUpdate::Committed {
+                        item_id: item.0["id"].as_str().map(str::to_owned),
+                        hash,
+                    },
+                });
+            }
+        }
+        Ok(item)
+    }
+
     async fn append_retaining_items(
         &self,
         id: &RequestId,
@@ -2966,14 +2983,21 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
         if item.0["type"] != "function_call" && item.0["type"] != "custom_tool_call" {
             return Ok(DispatchResult::NotCall);
         }
-        let encoding = provider
-            .tool_encoding_profile()
-            .unwrap_or(self.client.response_contract()?.0.tool_encoding_profile());
-        encoding.validate_invocation_item(&item)?;
+        let route_encoding = self.client.response_contract()?.0.tool_encoding_profile();
+        route_encoding.validate_invocation_item(&item)?;
         let call = item
             .tool_call()
             .map_err(|_| EngineError::InvalidFunctionCall)?
             .ok_or(EngineError::InvalidFunctionCall)?;
+        let encoding = provider.operation_encoding_profile(
+            &OperationId {
+                origin: self.origin.clone(),
+                request: request.clone(),
+                call: call.call_id.clone(),
+            },
+            route_encoding,
+        )?;
+        encoding.validate_invocation_item(&item)?;
         let settlement_owner = ToolSettlementOwner::for_invocation(&call);
         let execution = if settlement_owner == ToolSettlementOwner::EngineYield {
             call.execution
@@ -2985,7 +3009,7 @@ impl<A: Auth, P: Provider + 'static, C: ResponsesTransport> Engine<A, P, C> {
                     call: call.call_id.clone(),
                 },
                 &call,
-                self.client.response_contract()?.0.tool_encoding_profile(),
+                encoding,
             )?
         };
         let call_id = call.call_id;

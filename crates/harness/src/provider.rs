@@ -523,6 +523,15 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Replay selects the contract of the issuing request, not the current route.
+    fn operation_encoding_profile(
+        &self,
+        _operation: &OperationId,
+        route: crate::transport::ToolEncodingProfile,
+    ) -> Result<crate::transport::ToolEncodingProfile, ProviderError> {
+        Ok(self.tool_encoding_profile().unwrap_or(route))
+    }
+
     /// Resolve execution from the exact issuing declaration without editing wire items.
     fn operation_execution(
         &self,

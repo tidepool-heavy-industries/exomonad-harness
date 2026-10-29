@@ -451,4 +451,50 @@ mod tests {
             Err(StoreError::InvalidWaitContinuation { .. })
         ));
     }
+    #[test]
+    fn wait_publication_is_atomic_owned_and_retryable() {
+        for crossed in [true, false] {
+            let (store, local, original, next, output, message) = fixture(true);
+            let invocation = store.items(&original.request).unwrap().remove(0);
+            store
+                .append_items(&local.request, &[invocation.clone()])
+                .unwrap();
+            store.claim_operation(&local, &local.request).unwrap();
+            store
+                .write_job_output(
+                    &local,
+                    ToolKind::Function,
+                    &JobOutput::Completed(Ok(json!({"resumed_by":"user_input"}))),
+                )
+                .unwrap();
+            let mut witness = store
+                .replay_wait_continuation(&local, &original, Some(&next))
+                .unwrap()
+                .unwrap();
+            if crossed {
+                witness.local.request = RequestId("foreign".into());
+            }
+            let result = store.append_wait_output(
+                &local,
+                &local.request,
+                &local.request,
+                Some(witness.clone()),
+            );
+            if crossed {
+                assert!(result.is_err());
+                assert_eq!(store.items(&local.request).unwrap(), vec![invocation]);
+            } else {
+                assert_eq!(result.unwrap().0, output);
+                let retry = store
+                    .append_wait_output(&local, &local.request, &local.request, Some(witness))
+                    .unwrap();
+                assert!(retry.1.is_empty());
+                assert_eq!(
+                    store.items(&local.request).unwrap(),
+                    vec![invocation, output, message]
+                );
+                store.recovery_history(&local.request).unwrap();
+            }
+        }
+    }
 }

@@ -133,12 +133,14 @@ impl ResponsesTransport for Arc<Script> {
     }
 }
 fn call(id: &str, name: &str, arguments: Value) -> Item {
-    Item(json!({"type":"function_call","call_id":id,"name":name,"arguments":arguments}))
+    Item(
+        json!({"type":"function_call","namespace":"functions","call_id":id,"name":name,"arguments":arguments}),
+    )
 }
 fn host(dispatcher: Arc<Dispatcher>) -> Arc<Host> {
     Arc::new(Host {
         identity: HostIdentity { run: "portable".into(), actor: AgentPath("/root".into()), incarnation: "one".into() },
-        surface: Arc::new(ToolSurface::new("portable-v1".into(), vec![json!({"type":"function","name":"work","parameters":{"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false}})], dispatcher).unwrap()),
+        surface: Arc::new(ToolSurface::new("portable-v1".into(), vec![json!({"type":"function","name":"work","strict":true,"parameters":{"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false}})], dispatcher).unwrap()),
     })
 }
 fn config() -> EngineConfig {

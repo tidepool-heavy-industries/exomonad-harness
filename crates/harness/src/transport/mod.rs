@@ -369,7 +369,9 @@ impl ToolEncodingProfile {
         }
         let name = item.0["name"].as_str().unwrap_or("");
         if item.0["type"] != "function_call"
-            || item.0.get("namespace").is_some()
+            || item.0.get("namespace").is_some_and(|namespace| {
+                self != Self::FunctionResults || namespace.as_str() != Some("functions")
+            })
             || item.0.get("async").is_some()
             || name.is_empty()
             || name.len() > 128

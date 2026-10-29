@@ -229,7 +229,7 @@ pub(super) fn operation_surface(
         .ok_or_else(|| ProviderError::Tool("missing issuing operation surface".into()))
 }
 
-pub(super) fn recorded_execution(
+pub(crate) fn recorded_execution(
     store: &Store,
     operation: &crate::model::OperationId,
     call: &ToolCall,
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn function_results_preserves_domain_arguments_and_start_scheduling() {
         let manifest = EmbeddedToolManifest::with_scheduling(
-            vec![json!({"type":"function","name":"work","parameters":{"type":"object","properties":{"delivery":{"type":"string"}},"required":["delivery"],"additionalProperties":false}})],
+            vec![json!({"type":"function","name":"work","strict":true,"parameters":{"type":"object","properties":{"delivery":{"type":"string"}},"required":["delivery"],"additionalProperties":false}})],
             HashMap::from([("work".into(), ToolScheduling::Async)]),
         ).unwrap();
         let (projected, map) =

@@ -183,7 +183,7 @@ fn incomplete_and_gapped_steps_never_produce_a_successful_turn() {
 }
 
 #[test]
-fn duplicate_indices_late_deltas_and_invalid_arguments_are_refused() {
+fn duplicate_indices_and_late_deltas_fail_but_argument_refusals_keep_identity() {
     let mut duplicate = created();
     start(&mut duplicate, 0, json!({"type":"model_output"}));
     assert!(
@@ -210,7 +210,16 @@ fn duplicate_indices_late_deltas_and_invalid_arguments_are_refused() {
         json!({"type":"function_call","id":"a","name":"echo","arguments":{}}),
     );
     send(&mut invalid, json!({"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{broken"}})).unwrap();
-    assert!(send(&mut invalid, json!({"event_type":"step.stop","index":0})).is_err());
+    let done = stop(&mut invalid, 0);
+    let StreamEvent::CompletedItem(done) = &done[0] else {
+        panic!("completed call expected")
+    };
+    let call = done.item().tool_call().unwrap().unwrap();
+    assert_eq!(call.call_id.0, "a");
+    assert!(matches!(
+        call.input,
+        crate::item::ToolInput::InvalidFunction { .. }
+    ));
 }
 
 #[test]
