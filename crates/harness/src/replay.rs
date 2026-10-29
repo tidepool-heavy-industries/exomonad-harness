@@ -1724,7 +1724,17 @@ mod tests {
         );
         store.create_request(&root, None, "/root").unwrap();
         store
-            .append_items(&root, std::slice::from_ref(&call))
+            .record_replay_turn_for_target(
+                &root,
+                &request("failure-session"),
+                &ResponsesTurn {
+                    response_id: "failure-response".into(),
+                    items: vec![call],
+                    usage: Usage::default(),
+                },
+                crate::transport::ResponsesRoute::ChatGptPlan,
+                crate::transport::ResponsesProtocol::Standard,
+            )
             .unwrap();
         let operation = store.claim(&call_id, &root).unwrap();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1751,17 +1761,6 @@ mod tests {
         );
         store
             .write_job_output(&operation, ToolKind::Function, &output)
-            .unwrap();
-        store
-            .record_replay_turn(
-                &root,
-                &request("failure-session"),
-                &ResponsesTurn {
-                    response_id: "failure-response".into(),
-                    items: vec![call],
-                    usage: Usage::default(),
-                },
-            )
             .unwrap();
         let original = store.replay_output_operation(&operation).unwrap().unwrap();
         let expected: serde_json::Value =
@@ -2116,11 +2115,7 @@ mod tests {
             .admit_agent(&parent, None, Some(&root), &json!({}), &json!({}))
             .unwrap();
         store
-            .append_items(&root, std::slice::from_ref(&invocation))
-            .unwrap();
-        let parent_op = store.claim(&call, &root).unwrap();
-        store
-            .record_replay_turn(
+            .record_replay_turn_for_target(
                 &root,
                 &request("terminal-session"),
                 &ResponsesTurn {
@@ -2128,8 +2123,11 @@ mod tests {
                     items: vec![invocation],
                     usage: Usage::default(),
                 },
+                crate::transport::ResponsesRoute::ChatGptPlan,
+                crate::transport::ResponsesProtocol::Standard,
             )
             .unwrap();
+        let parent_op = store.claim(&call, &root).unwrap();
         let cuts = store
             .capture_checkpoint_cuts(&parent_op, &json!({}), Arc::new(()))
             .unwrap();
@@ -2137,7 +2135,7 @@ mod tests {
             .attach_checkpoint_child(
                 cuts.deferred(),
                 crate::checkpoint::CheckpointChild {
-                    path: &AgentPath("/root/terminal-child".into()),
+                    path: &AgentPath("/root/terminal_child".into()),
                     parent: &parent,
                     contract: &json!({}),
                     checkout: &json!({}),
@@ -2232,6 +2230,8 @@ mod tests {
         let (store, root, call) = recorded_terminal(&JobOutput::Completed(Ok(json!({}))), false);
         let provider = ReplayProvider::new(store, &root).unwrap();
         let local = RequestId("replay-direct".into());
+        let duplicate =
+            prepare_test_request(&provider, &local, request("terminal-session")).unwrap();
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
         stream_test_request(&provider, &local, request("terminal-session"), sink)
             .await
@@ -2246,10 +2246,14 @@ mod tests {
         );
         let (sink, _stream) = tokio::sync::mpsc::channel(4);
         assert!(matches!(
-            stream_test_request(&provider, &local, request("terminal-session"), sink).await,
+            provider.create_streaming(duplicate, sink).await,
             Err(TransportError::ReplayRequestReuse { .. })
         ));
         assert_eq!(provider.turns_remaining(), 0);
+        assert!(matches!(
+            provider.prepare_submission(),
+            Err(TransportError::UnprovenResponseContract)
+        ));
     }
 
     #[tokio::test]
@@ -2266,11 +2270,19 @@ mod tests {
         let sealed = store
             .seal_replay_request_with_occurrences(&root, &first, &[], None, &[])
             .unwrap();
-        store.append_items(&root, &[call.clone()]).unwrap();
-        store
-            .record_issued_replay_turn(
+        let issued = store
+            .issue_provider_request(
                 &root,
                 sealed,
+                (
+                    crate::transport::ResponsesRoute::ChatGptPlan,
+                    crate::transport::ResponsesProtocol::Standard,
+                ),
+            )
+            .unwrap();
+        store
+            .record_provider_turn(
+                &issued,
                 &ResponsesTurn {
                     response_id: "a".into(),
                     items: vec![call.clone()],
@@ -2306,11 +2318,19 @@ mod tests {
             )
             .unwrap();
         store.create_request(&next, Some(&root), "/root").unwrap();
-        store.append_items(&next, &[call.clone()]).unwrap();
-        store
-            .record_issued_replay_turn(
+        let issued = store
+            .issue_provider_request(
                 &next,
                 sealed,
+                (
+                    crate::transport::ResponsesRoute::ChatGptPlan,
+                    crate::transport::ResponsesProtocol::Standard,
+                ),
+            )
+            .unwrap();
+        store
+            .record_provider_turn(
+                &issued,
                 &ResponsesTurn {
                     response_id: "b".into(),
                     items: vec![call],
@@ -2375,7 +2395,19 @@ mod tests {
                 Item(json!({"type":"function_call", "call_id":id, "name":name, "arguments":"{}"}))
             })
             .collect();
-            store.append_items(&root, &calls).unwrap();
+            store
+                .record_replay_turn_for_target(
+                    &root,
+                    &first,
+                    &ResponsesTurn {
+                        response_id: "wait-issued".into(),
+                        items: calls,
+                        usage: Usage::default(),
+                    },
+                    crate::transport::ResponsesRoute::ChatGptPlan,
+                    crate::transport::ResponsesProtocol::Standard,
+                )
+                .unwrap();
             let mut outputs = vec![];
             for (id, output) in [
                 ("before", JobOutput::Completed(Ok(json!(1)))),
@@ -2412,17 +2444,6 @@ mod tests {
             store
                 .append_operation_output(&operation, &root, &root)
                 .unwrap();
-            store
-                .record_replay_turn(
-                    &root,
-                    &first,
-                    &ResponsesTurn {
-                        response_id: "wait-issued".into(),
-                        items: calls,
-                        usage: Usage::default(),
-                    },
-                )
-                .unwrap();
             store.create_request(&next, Some(&root), "/root").unwrap();
             let mut second = first.clone();
             second.input = store.items(&root).unwrap();
@@ -2441,9 +2462,17 @@ mod tests {
                     &occurrences,
                 )
                 .unwrap();
-            store
-                .record_issued_replay_turn(&next, issued, &final_turn())
+            let issued = store
+                .issue_provider_request(
+                    &next,
+                    issued,
+                    (
+                        crate::transport::ResponsesRoute::ChatGptPlan,
+                        crate::transport::ResponsesProtocol::Standard,
+                    ),
+                )
                 .unwrap();
+            store.record_provider_turn(&issued, &final_turn()).unwrap();
             let provider = ReplayProvider::new(store, &root).unwrap();
             let local = RequestId("replay-direct".into());
             let (sink, _stream) = tokio::sync::mpsc::channel(4);
@@ -2698,11 +2727,32 @@ mod tests {
         store.create_request(&root, None, "/root").unwrap();
         store.create_request(&child, Some(&root), "/root").unwrap();
         store
-            .append_items(&root, std::slice::from_ref(&call))
+            .record_replay_turn_for_target(
+                &root,
+                &request("ambiguous-session"),
+                &ResponsesTurn {
+                    response_id: "ambiguous-response".into(),
+                    items: vec![call.clone()],
+                    usage: Usage::default(),
+                },
+                crate::transport::ResponsesRoute::ChatGptPlan,
+                crate::transport::ResponsesProtocol::Standard,
+            )
             .unwrap();
         store
-            .append_items(&child, std::slice::from_ref(&call))
+            .record_replay_turn_for_target(
+                &child,
+                &request("ambiguous-session-child"),
+                &ResponsesTurn {
+                    response_id: "ambiguous-response-child".into(),
+                    items: vec![call],
+                    usage: Usage::default(),
+                },
+                crate::transport::ResponsesRoute::ChatGptPlan,
+                crate::transport::ResponsesProtocol::Standard,
+            )
             .unwrap();
+
         for (request, value) in [(&root, "first"), (&child, "second")] {
             let operation = store
                 .claim(&CallId("ambiguous-id".into()), request)
@@ -2717,28 +2767,6 @@ mod tests {
                 )
                 .unwrap();
         }
-        store
-            .record_replay_turn(
-                &root,
-                &request("ambiguous-session"),
-                &ResponsesTurn {
-                    response_id: "ambiguous-response".into(),
-                    items: vec![call.clone()],
-                    usage: Usage::default(),
-                },
-            )
-            .unwrap();
-        store
-            .record_replay_turn(
-                &child,
-                &request("ambiguous-session-child"),
-                &ResponsesTurn {
-                    response_id: "ambiguous-response-child".into(),
-                    items: vec![call],
-                    usage: Usage::default(),
-                },
-            )
-            .unwrap();
 
         let provider = ReplayProvider::new(store, &root).unwrap();
         assert_eq!(provider.calls.len(), 2);
